@@ -32,5 +32,5 @@ sample. Backtests ignore real fills and spreads. Not financial advice.
 
 Checks every 3 minutes with the same rules as the backtest (default: wait 2 bars,
 stop 1.5%, trail 1.5%). Closed trades are appended to `paper_trades.csv`.
-HOLD means "in the position"; WAIT means the entry delay is not over yet.
+BUY = enter now (shows take-profit and stop prices), HOLD = stay in, SELL = exit, WAIT = entry delay not over yet.
 Run it 2-4 weeks, then compare `paper_trades.csv` with the backtest before using real money.

@@ -61,7 +61,7 @@ def simulate_day(bars: pd.DataFrame, p: Params = Params(), final: bool = True) -
     final=False is for live use: the day is still running, so the last bar is
     NOT forced out at END_OF_DAY (returns None = keep holding)."""
     bars = bars.iloc[p.entry_delay:]
-    if len(bars) < 2:
+    if len(bars) < 1:
         return None
     entry = float(bars["open"].iloc[0]) * (1 + p.slippage)
     peak = entry

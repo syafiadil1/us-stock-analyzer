@@ -79,3 +79,11 @@ def test_live_decision_matches_backtest_when_replayed():
             break
     else:
         raise AssertionError("never sold")
+
+
+def test_buy_signal_fires_once_at_entry_bar():
+    from stock_analyzer.monitor import decide
+    bars = day([100, 100.1, 100.0, 100.05])
+    p = Params(slippage=0.0, entry_delay=1)
+    acts = [decide(bars.iloc[:n], p)[0] for n in range(1, 5)]
+    assert acts == ["WAIT", "BUY", "HOLD", "HOLD"]

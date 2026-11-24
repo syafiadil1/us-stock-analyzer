@@ -25,13 +25,17 @@ JOURNAL = Path("paper_trades.csv")
 def decide(bars: pd.DataFrame, p: Params, final: bool = False) -> tuple[str, str]:
     """Return (action, detail) for a day's 3-min bars so far."""
     day = bars.iloc[p.entry_delay:]
-    if len(day) < 2:
+    if len(day) < 1:
         return "WAIT", f"waiting for entry (delay {p.entry_delay} bars)"
+    entry = day["open"].iloc[0] * (1 + p.slippage)
     t = simulate_day(bars, p, final=final)
-    if t is None:
-        pct = (day["close"].iloc[-1] / (day["open"].iloc[0] * (1 + p.slippage)) - 1) * 100
-        return "HOLD", f"{pct:+.2f}% vs entry"
-    return "SELL", f"{t.reason} {t.ret * 100:+.2f}% (entry {t.entry:.2f} exit {t.exit:.2f})"
+    if t is not None:
+        return "SELL", f"{t.reason} {t.ret * 100:+.2f}% (entry {t.entry:.2f} exit {t.exit:.2f})"
+    if len(day) == 1:
+        return "BUY", (f"enter ~{entry:.2f} | take profit {entry * (1 + p.take_profit):.2f} "
+                       f"| stop {entry * (1 - p.stop_loss):.2f}")
+    pct = (day["close"].iloc[-1] / entry - 1) * 100
+    return "HOLD", f"{pct:+.2f}% vs entry"
 
 
 def log_trade(ticker: str, bars: pd.DataFrame, p: Params, detail: str) -> None:
@@ -56,6 +60,7 @@ def fetch_today(ticker: str) -> pd.DataFrame:
 
 def run_live(tickers: list[str], p: Params) -> None:
     done: set[str] = set()
+    bought: set[str] = set()
     while len(done) < len(tickers):
         now = pd.Timestamp.now(tz=NY)
         if now.weekday() >= 5 or now.time() < pd.Timestamp("09:30").time():
@@ -70,6 +75,10 @@ def run_live(tickers: list[str], p: Params) -> None:
             if bars.empty:
                 continue
             action, detail = decide(bars, p, final=final)
+            if action == "BUY":
+                if tk in bought:  # already announced; same entry bar seen twice
+                    action, detail = "HOLD", "in position"
+                bought.add(tk)
             print(f"{now:%H:%M} {tk:6s} {action:5s} {detail}")
             if action == "SELL":
                 log_trade(tk, bars, p, detail)
