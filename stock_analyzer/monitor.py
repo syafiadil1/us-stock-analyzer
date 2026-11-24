@@ -56,7 +56,8 @@ def fetch_today(ticker: str) -> pd.DataFrame:
     if raw.empty:
         return raw
     b = to_3min(raw)
-    return b[b.index.date == b.index[-1].date()]
+    today = pd.Timestamp.now(tz=NY).date()
+    return b[b.index.date == today]  # on holidays Yahoo returns the previous session: ignore it
 
 
 def run_live(tickers: list[str], p: Params) -> None:
@@ -66,8 +67,14 @@ def run_live(tickers: list[str], p: Params) -> None:
     bought: set[str] = set()
     while len(done) < len(tickers):
         now = pd.Timestamp.now(tz=NY)
-        if now.weekday() >= 5 or now.time() < pd.Timestamp("09:30").time():
-            print(f"{now:%a %H:%M} NY: market not open yet; waiting...")
+        if now.weekday() >= 5:
+            print("Weekend: market closed.")
+            return
+        if now.time() >= pd.Timestamp("16:00").time():
+            print("Market closed for today.")
+            return
+        if now.time() < pd.Timestamp("09:30").time():
+            print(f"{now:%H:%M} NY: market not open yet; waiting...")
             time.sleep(60)
             continue
         final = now.time() >= pd.Timestamp("15:57").time()
@@ -76,6 +83,9 @@ def run_live(tickers: list[str], p: Params) -> None:
                 continue
             bars = fetch_today(tk)
             if bars.empty:
+                if now.time() > pd.Timestamp("09:50").time():
+                    print(f"{tk}: no data for today after 09:50 NY (holiday?). Skipping.")
+                    done.add(tk)
                 continue
             action, detail = decide(bars, p, final=final)
             if action == "BUY":

@@ -45,3 +45,9 @@ Run it 2-4 weeks, then compare `paper_trades.csv` with the backtest before using
        export TELEGRAM_CHAT_ID="123456789"
 
 You then get a phone message on every BUY and SELL. Never commit the token.
+
+## Run it on a cloud server (no laptop/phone needed)
+
+On a small Ubuntu server: `git clone <repo> && cd us-stock-analyzer && bash deploy/setup.sh`,
+then `nano ~/.stock_env` to put in your Telegram token and chat id (the file is private to your user).
+Cron starts the monitor at 09:25 New York time every weekday; edit the tickers in `deploy/setup.sh` if you want others.
