@@ -87,3 +87,30 @@ def test_buy_signal_fires_once_at_entry_bar():
     p = Params(slippage=0.0, entry_delay=1)
     acts = [decide(bars.iloc[:n], p)[0] for n in range(1, 5)]
     assert acts == ["WAIT", "BUY", "HOLD", "HOLD"]
+
+
+def test_notify_is_noop_without_env(monkeypatch):
+    from stock_analyzer import notify
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+    assert notify.send("hi") is False
+
+
+def test_notify_posts_and_hides_token_on_failure(monkeypatch, capsys):
+    from stock_analyzer import notify
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "SECRET123")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
+    calls = []
+
+    class R:
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+
+    monkeypatch.setattr(notify.urllib.request, "urlopen", lambda req, timeout: calls.append(req) or R())
+    assert notify.send("BUY NVDA") is True and "SECRET123" in calls[0].full_url
+
+    def boom(req, timeout): raise OSError(req.full_url)
+    monkeypatch.setattr(notify.urllib.request, "urlopen", boom)
+    assert notify.send("x") is False
+    assert "SECRET123" not in capsys.readouterr().out

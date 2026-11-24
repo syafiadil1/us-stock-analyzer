@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from . import notify
 from .data import NY, to_3min
 from .strategy import Params, simulate_day
 
@@ -59,6 +60,8 @@ def fetch_today(ticker: str) -> pd.DataFrame:
 
 
 def run_live(tickers: list[str], p: Params) -> None:
+    if notify.enabled():
+        notify.send(f"Monitor started: {', '.join(tickers)}")
     done: set[str] = set()
     bought: set[str] = set()
     while len(done) < len(tickers):
@@ -80,6 +83,8 @@ def run_live(tickers: list[str], p: Params) -> None:
                     action, detail = "HOLD", "in position"
                 bought.add(tk)
             print(f"{now:%H:%M} {tk:6s} {action:5s} {detail}")
+            if action in ("BUY", "SELL"):
+                notify.send(f"{action} {tk}\n{detail}")
             if action == "SELL":
                 log_trade(tk, bars, p, detail)
                 done.add(tk)
