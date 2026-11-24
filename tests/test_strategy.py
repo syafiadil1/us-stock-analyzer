@@ -58,3 +58,24 @@ def test_summarize():
     t = simulate_day(day(list(np.linspace(100, 103, 30))), NOSLIP)
     s = summarize([t, t])
     assert s["trades"] == 2 and s["win_rate"] == 1.0
+
+
+def test_live_mode_does_not_force_end_of_day():
+    from stock_analyzer.monitor import decide
+    bars = day([100, 100.1, 100.0, 100.05, 100.0, 100.02])
+    assert decide(bars, NOSLIP, final=False)[0] == "HOLD"
+    assert decide(bars, NOSLIP, final=True)[0] == "SELL"
+
+
+def test_live_decision_matches_backtest_when_replayed():
+    from stock_analyzer.monitor import decide
+    closes = list(np.linspace(100, 103, 30))
+    bars = day(closes)
+    expected = simulate_day(bars, NOSLIP)
+    for n in range(2, len(bars) + 1):
+        action, detail = decide(bars.iloc[:n], NOSLIP, final=(n == len(bars)))
+        if action == "SELL":
+            assert expected.reason in detail
+            break
+    else:
+        raise AssertionError("never sold")

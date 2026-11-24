@@ -24,3 +24,13 @@ Market opens 09:30 New York time = 10:30pm Malaysia (winter/EST) or 9:30pm (summ
 
 **Caveats:** Yahoo only keeps ~30 days of 1-minute data, so results are a small
 sample. Backtests ignore real fills and spreads. Not financial advice.
+
+## Paper-trade monitor (alerts only, no orders)
+
+    python -m stock_analyzer.monitor NVDA TSLA AMD            # live, start before the open
+    python -m stock_analyzer.monitor NVDA --replay 2026-11-20 # replay a past day
+
+Checks every 3 minutes with the same rules as the backtest (default: wait 2 bars,
+stop 1.5%, trail 1.5%). Closed trades are appended to `paper_trades.csv`.
+HOLD means "in the position"; WAIT means the entry delay is not over yet.
+Run it 2-4 weeks, then compare `paper_trades.csv` with the backtest before using real money.

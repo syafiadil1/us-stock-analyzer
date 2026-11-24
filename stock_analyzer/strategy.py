@@ -55,8 +55,11 @@ def _is_choppy(closes: list[float], p: Params) -> bool:
     return flips >= p.chop_flips
 
 
-def simulate_day(bars: pd.DataFrame, p: Params = Params()) -> Trade | None:
-    """Run one trading day. `bars` = 3-minute OHLC for a single session."""
+def simulate_day(bars: pd.DataFrame, p: Params = Params(), final: bool = True) -> Trade | None:
+    """Run one trading day. `bars` = 3-minute OHLC for a single session.
+
+    final=False is for live use: the day is still running, so the last bar is
+    NOT forced out at END_OF_DAY (returns None = keep holding)."""
     bars = bars.iloc[p.entry_delay:]
     if len(bars) < 2:
         return None
@@ -82,7 +85,7 @@ def simulate_day(bars: pd.DataFrame, p: Params = Params()) -> Trade | None:
             reason = "TRAILING_DROP"
         elif _is_choppy(closes, p):
             reason = "CHOPPY"
-        elif i == last:
+        elif i == last and final:
             reason = "END_OF_DAY"
 
         if reason:
