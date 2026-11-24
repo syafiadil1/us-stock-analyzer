@@ -27,7 +27,8 @@ def fetch_intraday(ticker: str, days: int = 28, cache_dir: str | None = ".cache"
 
     cache = Path(cache_dir) / f"{ticker}_1m.csv" if cache_dir else None
     if cache and cache.exists():
-        df = pd.read_csv(cache, index_col=0, parse_dates=True)
+        df = pd.read_csv(cache, index_col=0)
+        df.index = pd.to_datetime(df.index, utc=True)  # cache mixes EST/EDT offsets
         return to_3min(df)
 
     end = pd.Timestamp.now(tz="UTC")

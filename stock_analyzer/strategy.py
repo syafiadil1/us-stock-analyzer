@@ -29,6 +29,7 @@ class Params:
     chop_move: float = 0.0015      # a bar-to-bar move counts as a "swing" if >= 0.15%
     chop_flips: int = 4            # this many direction flips inside the window = choppy
     slippage: float = 0.0005       # 0.05% worse fill on each side
+    entry_delay: int = 0           # wait this many 3-min bars after the open before buying
 
 
 @dataclass(frozen=True)
@@ -56,6 +57,7 @@ def _is_choppy(closes: list[float], p: Params) -> bool:
 
 def simulate_day(bars: pd.DataFrame, p: Params = Params()) -> Trade | None:
     """Run one trading day. `bars` = 3-minute OHLC for a single session."""
+    bars = bars.iloc[p.entry_delay:]
     if len(bars) < 2:
         return None
     entry = float(bars["open"].iloc[0]) * (1 + p.slippage)
