@@ -2,6 +2,7 @@
 
     python -m stock_analyzer.monitor NVDA TSLA AMD
     python -m stock_analyzer.monitor NVDA --replay 2026-11-20      # replay a past day
+    python -m stock_analyzer.monitor --scan 5 --giveback 0.6       # scanner picks 5, sell on 60% give-back
 
 Starts at the open, re-checks every 3 minutes with the SAME rules as the
 backtest, prints BUY / HOLD / SELL and writes closed paper trades to
@@ -18,7 +19,7 @@ import pandas as pd
 
 from . import notify
 from .data import NY, to_3min
-from .strategy import Params, simulate_day
+from .strategy import Params, giveback_price, simulate_day
 
 JOURNAL = Path("paper_trades.csv")
 
@@ -33,10 +34,16 @@ def decide(bars: pd.DataFrame, p: Params, final: bool = False) -> tuple[str, str
     if t is not None:
         return "SELL", f"{t.reason} {t.ret * 100:+.2f}% (entry {t.entry:.2f} exit {t.exit:.2f})"
     if len(day) == 1:
-        return "BUY", (f"enter ~{entry:.2f} | take profit {entry * (1 + p.take_profit):.2f} "
-                       f"| stop {entry * (1 - p.stop_loss):.2f}")
+        tp = f"take profit {entry * (1 + p.take_profit):.2f}" if p.take_profit > 0 else "no fixed take profit"
+        gb = f" | give-back {p.giveback * 100:.0f}% of gain" if p.giveback > 0 else ""
+        return "BUY", f"enter ~{entry:.2f} | {tp} | stop {entry * (1 - p.stop_loss):.2f}{gb}"
     pct = (day["close"].iloc[-1] / entry - 1) * 100
-    return "HOLD", f"{pct:+.2f}% vs entry"
+    peak = max(entry, float(day["close"].max()))
+    detail = f"{pct:+.2f}% vs entry | best {(peak / entry - 1) * 100:+.2f}%"
+    gb = giveback_price(entry, peak, p)
+    if gb is not None:
+        detail += f" | sell if below {gb:.2f}"
+    return "HOLD", detail
 
 
 def log_trade(ticker: str, bars: pd.DataFrame, p: Params, detail: str) -> None:
@@ -60,7 +67,35 @@ def fetch_today(ticker: str) -> pd.DataFrame:
     return b[b.index.date == today]  # on holidays Yahoo returns the previous session: ignore it
 
 
+def wait_until(hhmm: str) -> bool:
+    """Sleep until hh:mm New York time today. False if that time already passed."""
+    target = pd.Timestamp.now(tz=NY).normalize() + pd.Timedelta(hhmm + ":00")
+    if pd.Timestamp.now(tz=NY) >= target:
+        return False
+    while (now := pd.Timestamp.now(tz=NY)) < target:
+        print(f"{now:%H:%M} NY: waiting until {hhmm} NY...")
+        time.sleep(min(300, (target - now).total_seconds()))
+    return True
+
+
+def scan_tickers(n: int, target: float) -> list[str]:
+    from . import scanner
+
+    if pd.Timestamp.now(tz=NY).weekday() >= 5:
+        return []  # weekend: run_live will say the market is closed
+    wait_until("09:20")  # pre-market prices are most useful just before the open
+    table = scanner.scan(scanner.WATCHLIST, target=target)
+    picks = scanner.top(table, n)
+    msg = scanner.format_message(table, picks, target)
+    print(msg)
+    notify.send(msg)
+    return picks
+
+
 def run_live(tickers: list[str], p: Params) -> None:
+    if not tickers:
+        print("No stocks to watch (weekend, or none passed the scanner filters).")
+        return
     if notify.enabled():
         notify.send(f"Monitor started: {', '.join(tickers)}")
     done: set[str] = set()
@@ -119,14 +154,23 @@ def replay(ticker: str, day: str, p: Params) -> None:
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("tickers", nargs="+")
+    ap.add_argument("tickers", nargs="*", help="stocks to watch (or use --scan)")
+    ap.add_argument("--scan", type=int, metavar="N", help="let the scanner pick the top N stocks at 09:20 NY")
+    ap.add_argument("--scan-target", type=float, default=0.03, help="scanner: rise from the open to look for (0.03 = 3%%)")
     ap.add_argument("--replay", help="YYYY-MM-DD: replay that day instead of going live")
     ap.add_argument("--delay", type=int, default=2, help="3-min bars to wait after the open")
     ap.add_argument("--stop-loss", type=float, default=0.015)
-    ap.add_argument("--trail-drop", type=float, default=0.015)
+    ap.add_argument("--trail-drop", type=float, default=0.015, help="0 = off")
+    ap.add_argument("--take-profit", type=float, default=0.02, help="0 = off (let winners run)")
+    ap.add_argument("--giveback", type=float, default=0.0,
+                    help="sell after giving back this share of the best gain, e.g. 0.6 = 60%% (0 = off)")
+    ap.add_argument("--giveback-arm", type=float, default=0.005, help="give-back starts once up this much")
     a = ap.parse_args()
-    params = Params(entry_delay=a.delay, stop_loss=a.stop_loss, trail_drop=a.trail_drop)
+    params = Params(entry_delay=a.delay, stop_loss=a.stop_loss, trail_drop=a.trail_drop,
+                    take_profit=a.take_profit, giveback=a.giveback, giveback_arm=a.giveback_arm)
+    if not a.tickers and not a.scan:
+        ap.error("give tickers or --scan N")
     if a.replay:
         replay(a.tickers[0], a.replay, params)
     else:
-        run_live(a.tickers, params)
+        run_live(a.tickers or scan_tickers(a.scan, a.scan_target), params)

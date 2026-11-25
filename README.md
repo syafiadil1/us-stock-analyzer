@@ -57,3 +57,20 @@ Cron starts the monitor at 09:25 New York time every weekday; edit the tickers i
     bash deploy/mac_run.sh NVDA TSLA AMD
 
 Uses `caffeinate` so the Mac does not sleep while the monitor runs. Keep it plugged in.
+
+## Scanner + give-back sell alert
+
+**Scanner**: which stocks have OFTEN risen X% after the open (last 3 months), filtered to
+liquid stocks in an uptrend with a hit rate of at least 20%, plus their pre-market move:
+
+    .venv/bin/python -m stock_analyzer.scanner --target 0.03 --top 5 --telegram
+
+**Give-back sell**: once a trade is up at least 0.5%, SELL when it has handed back a share of its
+best gain. With `--giveback 0.6`: entry 100, peak 103 (+3%) -> sell at 101.20. Any share works
+(0.4, 0.5, ...). `--take-profit 0 --trail-drop 0` turns off the fixed exits so winners can run.
+
+Let the scanner pick 5 stocks at 09:20 NY, then watch them with a 50% give-back:
+
+    bash deploy/mac_run.sh --scan 5 --scan-target 0.03 --giveback 0.5 --take-profit 0 --trail-drop 0
+
+The hit rate is history, not a forecast. Backtest a give-back level before trusting it.

@@ -114,3 +114,46 @@ def test_notify_posts_and_hides_token_on_failure(monkeypatch, capsys):
     monkeypatch.setattr(notify.urllib.request, "urlopen", boom)
     assert notify.send("x") is False
     assert "SECRET123" not in capsys.readouterr().out
+
+
+def test_giveback_example_from_readme():
+    # entry 100, peak 103 (+3%), 60% give-back -> sell at or below 101.20
+    p = Params(slippage=0.0, take_profit=0, trail_drop=0, giveback=0.6, stop_loss=0.05)
+    t = simulate_day(day([100, 101, 102, 103, 102.5, 101.5, 101.2, 101.0]), p)
+    assert t.reason == "GIVEBACK" and abs(t.exit - 101.2) < 1e-9
+
+
+def test_giveback_waits_until_armed():
+    # only up 0.3% (< 0.5% arm), then dips: give-back must not fire
+    p = Params(slippage=0.0, take_profit=0, trail_drop=0, giveback=0.6, stop_loss=0.05)
+    t = simulate_day(day([100, 100.3, 100.05, 100.0, 100.1]), p)
+    assert t.reason == "END_OF_DAY"
+
+
+def test_giveback_off_by_default_keeps_old_behaviour():
+    closes = [100, 100.5, 101, 101.5, 101.9, 101.1, 101.0, 101.0]
+    assert simulate_day(day(closes), NOSLIP).reason == "TRAILING_DROP"
+
+
+def test_hold_shows_giveback_sell_price():
+    from stock_analyzer.monitor import decide
+    p = Params(slippage=0.0, take_profit=0, trail_drop=0, giveback=0.6, stop_loss=0.05)
+    action, detail = decide(day([100, 101, 103, 102.8]), p, final=False)
+    assert action == "HOLD" and "sell if below 101.20" in detail
+
+
+def test_scanner_score_and_top():
+    from stock_analyzer import scanner
+    idx = pd.date_range("2026-08-01", periods=30, freq="B")
+    up = pd.DataFrame({"Open": 100.0, "High": 104.0, "Low": 99.0,
+                       "Close": np.linspace(100, 110, 30), "Volume": 5e6}, index=idx)
+    s = scanner.score(up, target=0.03)
+    assert s["hit_rate"] == 1.0 and s["trend_up"] and s["dollar_vol_M"] > 200
+    table = pd.DataFrame({
+        "AAA": {"hit_rate": 0.5, "dollar_vol_M": 900.0, "trend_up": True, "avg_range_%": 4.0, "premkt_%": 1.0},
+        "BBB": {"hit_rate": 0.9, "dollar_vol_M": 50.0, "trend_up": True, "avg_range_%": 6.0, "premkt_%": None},
+        "CCC": {"hit_rate": 0.8, "dollar_vol_M": 900.0, "trend_up": False, "avg_range_%": 5.0, "premkt_%": None},
+    }).T
+    assert scanner.top(table, 3) == ["AAA"]  # BBB illiquid, CCC downtrend
+    msg = scanner.format_message(table, ["AAA"], 0.03)
+    assert "AAA: hit 50%" in msg and "not a forecast" in msg

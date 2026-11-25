@@ -7,6 +7,9 @@ Rules (from the trader's own routine):
   * SELL when price is whipsawing (many fast up/down swings)      -> CHOPPY
   * HOLD while price keeps grinding up, but SELL when it suddenly
     drops a lot from its running high                             -> TRAILING_DROP
+  * GIVEBACK (optional): once the trade is up at least giveback_arm, SELL when
+    it has handed back `giveback` of its best gain. Example giveback=0.6:
+    entry 100, peak 103 (+3%) -> sell at 101.20 (kept 40% of the gain).
   * Extra safety (not in the original routine, defaults can be tuned):
     hard STOP_LOSS and forced sale at the close (no overnight risk).
 
@@ -22,9 +25,11 @@ import pandas as pd
 
 @dataclass(frozen=True)
 class Params:
-    take_profit: float = 0.02      # sell when up 2%
+    take_profit: float = 0.02      # sell when up 2% (0 = off, let winners run)
     stop_loss: float = 0.01        # hard stop: down 1% from entry
-    trail_drop: float = 0.007      # sell if price falls 0.7% from running high
+    trail_drop: float = 0.007      # sell if price falls 0.7% from running high (0 = off)
+    giveback: float = 0.0          # sell after handing back this share of the best gain (0 = off)
+    giveback_arm: float = 0.005    # ...but only once the trade has been up at least 0.5%
     chop_window: int = 8           # look back this many 3-min bars (~24 min)
     chop_move: float = 0.0015      # a bar-to-bar move counts as a "swing" if >= 0.15%
     chop_flips: int = 4            # this many direction flips inside the window = choppy
@@ -55,6 +60,13 @@ def _is_choppy(closes: list[float], p: Params) -> bool:
     return flips >= p.chop_flips
 
 
+def giveback_price(entry: float, peak: float, p: Params) -> float | None:
+    """Price at which the GIVEBACK rule sells, or None while it is not armed."""
+    if p.giveback <= 0 or peak / entry - 1 < p.giveback_arm:
+        return None
+    return entry + (peak - entry) * (1 - p.giveback)
+
+
 def simulate_day(bars: pd.DataFrame, p: Params = Params(), final: bool = True) -> Trade | None:
     """Run one trading day. `bars` = 3-minute OHLC for a single session.
 
@@ -77,11 +89,14 @@ def simulate_day(bars: pd.DataFrame, p: Params = Params(), final: bool = True) -
         max_run_up = max(max_run_up, pct)
 
         reason = None
-        if pct >= p.take_profit:
+        gb = giveback_price(entry, peak, p)
+        if p.take_profit > 0 and pct >= p.take_profit:
             reason = "TAKE_PROFIT"
         elif pct <= -p.stop_loss:
             reason = "STOP_LOSS"
-        elif peak > entry and c / peak - 1 <= -p.trail_drop:
+        elif gb is not None and c <= gb:
+            reason = "GIVEBACK"
+        elif p.trail_drop > 0 and peak > entry and c / peak - 1 <= -p.trail_drop:
             reason = "TRAILING_DROP"
         elif _is_choppy(closes, p):
             reason = "CHOPPY"
