@@ -46,13 +46,32 @@ def decide(bars: pd.DataFrame, p: Params, final: bool = False) -> tuple[str, str
     return "HOLD", detail
 
 
-def log_trade(ticker: str, bars: pd.DataFrame, p: Params, detail: str) -> None:
-    new = not JOURNAL.exists()
-    with JOURNAL.open("a", newline="") as f:
+JOURNAL_COLS = ["date", "ticker", "entry", "exit", "reason", "ret_pct", "best_pct", "exit_time", "settings"]
+
+
+def log_trade(ticker: str, t, p: Params, path: Path = JOURNAL) -> None:
+    """Append one closed paper trade as a structured row (easy to analyse later)."""
+    new = not path.exists()
+    with path.open("a", newline="") as f:
         w = csv.writer(f)
         if new:
-            w.writerow(["date", "ticker", "result"])
-        w.writerow([bars.index[-1].date(), ticker, detail])
+            w.writerow(JOURNAL_COLS)
+        settings = (f"tp={p.take_profit} sl={p.stop_loss} trail={p.trail_drop} "
+                    f"giveback={p.giveback} delay={p.entry_delay}")
+        w.writerow([t.date.date(), ticker, round(t.entry, 4), round(t.exit, 4), t.reason,
+                    round(t.ret * 100, 3), round(t.max_run_up * 100, 3), f"{t.exit_time:%H:%M}", settings])
+
+
+def day_summary(results: dict) -> str:
+    """Telegram-friendly end-of-day recap. results: ticker -> Trade."""
+    if not results:
+        return "Day summary: no trades closed today."
+    lines = ["Day summary (paper trades):"]
+    for tk, t in results.items():
+        lines.append(f"{tk}: {t.ret * 100:+.2f}% ({t.reason}, best {t.max_run_up * 100:+.2f}%)")
+    avg = sum(t.ret for t in results.values()) / len(results) * 100
+    lines.append(f"Average: {avg:+.2f}% over {len(results)} trade(s)")
+    return "\n".join(lines)
 
 
 def fetch_today(ticker: str) -> pd.DataFrame:
@@ -100,6 +119,18 @@ def run_live(tickers: list[str], p: Params) -> None:
         notify.send(f"Monitor started: {', '.join(tickers)}")
     done: set[str] = set()
     bought: set[str] = set()
+    errors: dict[str, int] = {}
+    results: dict = {}
+    try:
+        _loop(tickers, p, done, bought, errors, results)
+    finally:
+        if bought:
+            msg = day_summary(results)
+            print(msg)
+            notify.send(msg)
+
+
+def _loop(tickers, p, done, bought, errors, results) -> None:
     while len(done) < len(tickers):
         now = pd.Timestamp.now(tz=NY)
         if now.weekday() >= 5:
@@ -116,7 +147,15 @@ def run_live(tickers: list[str], p: Params) -> None:
         for tk in tickers:
             if tk in done:
                 continue
-            bars = fetch_today(tk)
+            try:
+                bars = fetch_today(tk)
+            except Exception as e:  # flaky network / Yahoo hiccup: try again next round
+                errors[tk] = errors.get(tk, 0) + 1
+                print(f"{now:%H:%M} {tk}: data fetch failed ({type(e).__name__}), retrying next check")
+                if errors[tk] == 5:
+                    notify.send(f"Warning: {tk} data failed 5 times in a row ({type(e).__name__})")
+                continue
+            errors[tk] = 0
             if bars.empty:
                 if now.time() > pd.Timestamp("09:50").time():
                     print(f"{tk}: no data for today after 09:50 NY (holiday?). Skipping.")
@@ -131,7 +170,10 @@ def run_live(tickers: list[str], p: Params) -> None:
             if action in ("BUY", "SELL"):
                 notify.send(f"{action} {tk}\n{detail}")
             if action == "SELL":
-                log_trade(tk, bars, p, detail)
+                t = simulate_day(bars, p, final=final)
+                if t is not None:
+                    log_trade(tk, t, p)
+                    results[tk] = t
                 done.add(tk)
         if final:
             break
@@ -173,4 +215,10 @@ if __name__ == "__main__":
     if a.replay:
         replay(a.tickers[0], a.replay, params)
     else:
-        run_live(a.tickers or scan_tickers(a.scan, a.scan_target), params)
+        try:
+            run_live(a.tickers or scan_tickers(a.scan, a.scan_target), params)
+        except KeyboardInterrupt:
+            print("Stopped.")
+        except Exception as e:
+            notify.send(f"Monitor crashed: {type(e).__name__}. Restart it: bash deploy/mac_run.sh ...")
+            raise

@@ -61,7 +61,10 @@ Uses `caffeinate` so the Mac does not sleep while the monitor runs. Keep it plug
 ## Scanner + give-back sell alert
 
 **Scanner**: which stocks have OFTEN risen X% after the open (last 3 months), filtered to
-liquid stocks in an uptrend with a hit rate of at least 20%, plus their pre-market move:
+liquid stocks with a hit rate of at least 20%, plus their pre-market move. On 2 years of daily
+data a high past hit rate did predict more +3% days (42% vs 7%), but the average open-to-close
+return was still ~0: it finds stocks that move, not stocks that will rise. An uptrend filter
+was tested and did not help, so it is off.
 
     .venv/bin/python -m stock_analyzer.scanner --target 0.03 --top 5 --telegram
 
@@ -74,3 +77,7 @@ Let the scanner pick 5 stocks at 09:20 NY, then watch them with a 50% give-back:
     bash deploy/mac_run.sh --scan 5 --scan-target 0.03 --giveback 0.5 --take-profit 0 --trail-drop 0
 
 The hit rate is history, not a forecast. Backtest a give-back level before trusting it.
+
+Each closed paper trade goes to `paper_trades.csv` (entry, exit, reason, return, best gain,
+settings), and a day summary is sent to Telegram after the last sale. Data errors are retried
+on the next check; you get a Telegram warning if a stock keeps failing or the monitor crashes.

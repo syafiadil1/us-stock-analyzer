@@ -154,6 +154,22 @@ def test_scanner_score_and_top():
         "BBB": {"hit_rate": 0.9, "dollar_vol_M": 50.0, "trend_up": True, "avg_range_%": 6.0, "premkt_%": None},
         "CCC": {"hit_rate": 0.8, "dollar_vol_M": 900.0, "trend_up": False, "avg_range_%": 5.0, "premkt_%": None},
     }).T
-    assert scanner.top(table, 3) == ["AAA"]  # BBB illiquid, CCC downtrend
+    assert scanner.top(table, 3) == ["CCC", "AAA"]  # BBB illiquid
+    assert scanner.top(table, 3, require_uptrend=True) == ["AAA"]
     msg = scanner.format_message(table, ["AAA"], 0.03)
     assert "AAA: hit 50%" in msg and "not a forecast" in msg
+
+
+def test_journal_row_and_day_summary(tmp_path):
+    from stock_analyzer.monitor import JOURNAL_COLS, day_summary, log_trade
+    p = Params(slippage=0.0, take_profit=0, trail_drop=0, giveback=0.6, stop_loss=0.05)
+    t = simulate_day(day([100, 101, 102, 103, 102.5, 101.5, 101.2, 101.0]), p)
+    f = tmp_path / "j.csv"
+    log_trade("NVDA", t, p, path=f)
+    log_trade("TSLA", t, p, path=f)
+    rows = pd.read_csv(f)
+    assert list(rows.columns) == JOURNAL_COLS and len(rows) == 2
+    assert rows.loc[0, "reason"] == "GIVEBACK" and abs(rows.loc[0, "ret_pct"] - 1.2) < 1e-6
+    msg = day_summary({"NVDA": t})
+    assert "NVDA: +1.20% (GIVEBACK" in msg and "Average: +1.20%" in msg
+    assert "no trades" in day_summary({})
