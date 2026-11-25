@@ -173,3 +173,13 @@ def test_journal_row_and_day_summary(tmp_path):
     msg = day_summary({"NVDA": t})
     assert "NVDA: +1.20% (GIVEBACK" in msg and "Average: +1.20%" in msg
     assert "no trades" in day_summary({})
+
+
+def test_scanner_split_handles_batch_and_single():
+    from stock_analyzer.scanner import _split
+    idx = pd.date_range("2026-11-02", periods=3, freq="B")
+    one = pd.DataFrame({"Open": 1.0, "High": 1.0, "Low": 1.0, "Close": 1.0, "Volume": 1}, index=idx)
+    batch = pd.concat({"AAA": one, "BBB": one * float("nan")}, axis=1)
+    out = _split(batch, ["AAA", "BBB", "CCC"])
+    assert list(out) == ["AAA"]  # BBB empty, CCC missing
+    assert list(_split(one, ["ZZZ"])) == ["ZZZ"]

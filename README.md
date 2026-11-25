@@ -54,7 +54,8 @@ Cron starts the monitor at 09:25 New York time every weekday; edit the tickers i
 
 ## Run on a Mac
 
-    bash deploy/mac_run.sh NVDA TSLA AMD
+    bash deploy/mac_run.sh                 # recommended setup (below)
+    bash deploy/mac_run.sh NVDA TSLA AMD   # your own list, older rules
 
 Uses `caffeinate` so the Mac does not sleep while the monitor runs. Keep it plugged in.
 
@@ -81,3 +82,23 @@ The hit rate is history, not a forecast. Backtest a give-back level before trust
 Each closed paper trade goes to `paper_trades.csv` (entry, exit, reason, return, best gain,
 settings), and a day summary is sent to Telegram after the last sale. Data errors are retried
 on the next check; you get a Telegram warning if a stock keeps failing or the monitor crashes.
+
+## Recommended setup (what the tests showed)
+
+`bash deploy/mac_run.sh` with no options = scanner picks 5 of ~100 stocks at 09:20 NY, buys
+6 minutes after the open, stop 3%, give-back starts at +1% and sells after 40% is handed back.
+
+Tested on Yahoo data (Nov 2026), judged on data the settings were not picked on:
+
+| Check | Result |
+|---|---|
+| Top-5 picks that hit +3% after the open, 2 years daily, 30 stocks | 41% of picks |
+| Same, ~100 stocks | 50% (ranking by daily range: 52%; a 13-feature model: 53%, not worth it) |
+| Average open-to-close of those picks | about 0%: it predicts MOVEMENT, not direction |
+| Uptrend filter / market-gap filter | no improvement, not used |
+| 20 days intraday, top-5 picks, stop 1.5% + 50% give-back | -0.1% to -0.2% per trade |
+| Same, stop 3% + arm 1% + 40% give-back | +0.1% to +0.5% per trade, 50-66% wins |
+| Stops scaled to each stock's volatility | no better than fixed 3% |
+
+20 days is a small sample and picks cluster in a few volatile names (crypto miners, MRNA...).
+Paper-trade it for several weeks and review `paper_trades.csv` before trusting it.

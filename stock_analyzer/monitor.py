@@ -206,7 +206,7 @@ if __name__ == "__main__":
     ap.add_argument("--take-profit", type=float, default=0.02, help="0 = off (let winners run)")
     ap.add_argument("--giveback", type=float, default=0.0,
                     help="sell after giving back this share of the best gain, e.g. 0.6 = 60%% (0 = off)")
-    ap.add_argument("--giveback-arm", type=float, default=0.005, help="give-back starts once up this much")
+    ap.add_argument("--giveback-arm", type=float, default=0.01, help="give-back starts once up this much")
     a = ap.parse_args()
     params = Params(entry_delay=a.delay, stop_loss=a.stop_loss, trail_drop=a.trail_drop,
                     take_profit=a.take_profit, giveback=a.giveback, giveback_arm=a.giveback_arm)
