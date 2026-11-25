@@ -51,3 +51,9 @@ You then get a phone message on every BUY and SELL. Never commit the token.
 On a small Ubuntu server: `git clone <repo> && cd us-stock-analyzer && bash deploy/setup.sh`,
 then `nano ~/.stock_env` to put in your Telegram token and chat id (the file is private to your user).
 Cron starts the monitor at 09:25 New York time every weekday; edit the tickers in `deploy/setup.sh` if you want others.
+
+## Run on a Mac
+
+    bash deploy/mac_run.sh NVDA TSLA AMD
+
+Uses `caffeinate` so the Mac does not sleep while the monitor runs. Keep it plugged in.
