@@ -122,6 +122,16 @@ Tested on Yahoo data, Sep 2 - Nov 25 2026, ~100 stocks, top-15 candidates per da
 The gap rule was chosen on the first 30 days only and then improved the last 30 days too; it
 also matches 2 years of daily data (gap-ups > 3% averaged -0.28% open-to-close).
 
+Nov 27 2026, 20 more ideas were tested against this preset with pass rules fixed in advance
+(better average AND win rate, better in all three 20-day blocks, still better at 0.2% costs,
+no lower total, >= 45 trades, >= 80% chance of being better when days are resampled).
+None passed: ranking by volatility, a bigger pool, time stops at 14:00/15:00, skipping
+over-extended or "chasing" breakouts, stop 2.5%, give-back 35/45%, entry deadline
+10:45/11:30, gap limit 2%, skipping stocks under $10 (closest: 5 of 7 checks), two-close
+confirmation, skipping correlated stocks (hurt: profits come in clusters of related stocks
+moving together, which is also a risk), stricter hit rate, max 3 or 8 positions per day
+(8 earns more in total, not more per trade). So the preset stays as it is.
+
 What did NOT help: stock-vs-QQQ strength, QQQ still green at the breakout, breakout-bar
 volume, opening-range width, a fixed take-profit (win rate unchanged, return lower), the uptrend
 filter, volatility-scaled stops, relative-volume and gap filters, a 13-feature model.
