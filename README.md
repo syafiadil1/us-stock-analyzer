@@ -95,17 +95,20 @@ Each closed paper trade goes to `paper_trades.csv` (entry, exit, reason, return,
 settings), and a day summary is sent to Telegram at the end. Data errors are retried
 on the next check; you get a Telegram warning if a stock keeps failing or the monitor crashes.
 
-**Hourly updates.** Once a stock gets a BUY, one Telegram message every clock hour
-(11:00, 12:00 ... 15:00 NY = midnight to 4 am Malaysia in US winter) lists each stock bought today:
+**Price-up alerts (any time).** Once a stock gets a BUY, you get a PRICE UP message each time
+it reaches a new +1% level since the buy (+1%, +2%, +3% ..., each level once; checked on the
+3-minute closes, so no clock schedule):
 
-    HOURLY UPDATE 12:00 NY (1:00 am Malaysia)
-    ADBE holding: now 251.07 | last hour +0.38% | since buy +0.42% (in at ~250.02) | sell if below 242.52
-    PATH SOLD (GIVEBACK +0.44%): now 13.40 | since sell +0.94%
+    PRICE UP (10:33 NY / 11:33 pm Malaysia)
+    RIOT +2.05% since buy: now 17.82 (in at ~17.46) | sell if below 17.67
 
-Sold stocks stay in the update until the close, so you can see whether selling was right.
-The first update after a buy (or sale) shows only "since buy" ("since sell"). `--update-every 30`
-changes the interval, `--update-every 0` turns it off. The updates are information only and
-do not change any buy/sell rule.
+After a SELL the stock is still watched until the close, measured from the sale price, so you see
+whether selling was right ("RGTI +3.37% since you sold ... already sold, this is not a new BUY").
+On busy days these after-sale alerts are most of the messages (Nov 9: 13 of 14), so
+`--no-after-sale` turns them off. `--up-step 0.02` alerts every +2%, `--up-step 0` turns it off.
+`--update-every 60` adds an update on every bought stock on each clock hour.
+Drops are not alerted separately: the SELL alert (stop / give-back) covers them.
+None of this changes any buy/sell rule.
 
 ## Recommended setup (what the tests showed)
 

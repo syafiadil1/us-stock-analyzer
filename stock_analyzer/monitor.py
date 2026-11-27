@@ -6,8 +6,9 @@
 
 Re-checks every 3 minutes with the SAME rules as the backtest (strategy.py), prints
 WAIT / BUY / HOLD / SELL / SKIP and writes closed paper trades to paper_trades.csv.
-Every hour (on the clock hour, --update-every 60; 0 = off) it also sends one message on every
-stock bought today: price now, change in the last hour, and since the buy (or since the sale).
+Each time a stock bought today reaches a new +1% level (--up-step 0.01; 0 = off), at any time of
+day, it sends a PRICE UP alert: +1%, +2%, +3% ... since the buy, or since the sale once sold.
+Optional: --update-every 60 adds an update on every bought stock on each clock hour.
 Yahoo's free feed can lag, so treat prices as approximate.
 """
 from __future__ import annotations
@@ -15,6 +16,7 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime as dt
+import math
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -238,6 +240,69 @@ class HourlyReport:
         return "\n".join(lines)
 
 
+class UpAlerts:
+    """Alert each time a bought stock reaches a NEW +step level (default every +1%), any time of day.
+
+    Holding: measured from the buy price (+1%, +2%, +3% ... each level once).
+    Sold:    measured from the sale price, so you see what happened after selling (not a BUY).
+    A jump over several levels in one 3-min bar gives one alert. Ups only: the downside is
+    already covered by the SELL rules (stop / give-back)."""
+
+    def __init__(self, step: float = 0.01, after_sale: bool = True):
+        self.step, self.after_sale = step, after_sale
+        self.pos: dict[str, dict] = {}
+
+    def bought(self, tk: str) -> None:
+        if self.step > 0 and tk not in self.pos:
+            self.pos[tk] = dict(entry=None, level=0, sold=None, sell_px=None)
+
+    def sold(self, tk: str, t, sell_px: float) -> None:
+        if not self.after_sale:
+            self.pos.pop(tk, None)
+            return
+        s = self.pos.get(tk)
+        if s is not None:
+            s.update(sold=t, sell_px=sell_px, level=0)
+
+    def drop(self, tk: str) -> None:
+        self.pos.pop(tk, None)
+
+    def sold_tickers(self) -> list[str]:
+        return [tk for tk, s in self.pos.items() if s["sold"] is not None]
+
+    def watching(self) -> bool:
+        """True while a sold stock is still being watched for after-sale rises."""
+        return bool(self.sold_tickers())
+
+    def check(self, tk: str, price: float | None, entry: float | None = None,
+              line: float | None = None) -> str | None:
+        """One alert line if `price` reached a new level, else None."""
+        s = self.pos.get(tk)
+        if s is None or price is None:
+            return None
+        if entry is not None and s["sold"] is None:
+            s["entry"] = entry
+        base = s["sell_px"] if s["sold"] is not None else s["entry"]
+        if base is None:
+            return None
+        gain = price / base - 1
+        level = math.floor(gain / self.step + 1e-9)
+        if level <= s["level"]:
+            return None
+        s["level"] = level
+        if s["sold"] is None:
+            txt = f"{tk} +{gain * 100:.2f}% since buy: now {price:.2f} (in at ~{base:.2f})"
+            return txt + (f" | sell if below {line:.2f}" if line is not None else "")
+        t = s["sold"]
+        return (f"{tk} +{gain * 100:.2f}% since you sold ({t.reason} {t.ret * 100:+.2f}%): now {price:.2f}"
+                " | already sold, this is not a new BUY")
+
+
+def up_message(now: pd.Timestamp, lines: list[str]) -> str:
+    my = now.tz_convert(MYT).strftime("%-I:%M %p").lower()
+    return "\n".join([f"PRICE UP ({now:%H:%M} NY / {my} Malaysia)"] + lines)
+
+
 JOURNAL_COLS = ["date", "ticker", "entry", "exit", "reason", "ret_pct", "best_pct", "exit_time", "settings"]
 
 
@@ -356,7 +421,8 @@ def _last_check(now: pd.Timestamp) -> pd.Timestamp:
     return now.normalize() + pd.Timedelta(_minus(session_close(now.date()), 3) + ":00")
 
 
-def run_live(tickers: list[str], p: Params, max_positions: int | None = None, update_every: int = 60) -> None:
+def run_live(tickers: list[str], p: Params, max_positions: int | None = None, update_every: int = 0,
+             up_step: float = 0.01, after_sale: bool = True) -> None:
     if not tickers:
         print("No stocks to watch (weekend, or none passed the scanner filters).")
         return
@@ -367,7 +433,8 @@ def run_live(tickers: list[str], p: Params, max_positions: int | None = None, up
     errors: dict[str, int] = {}
     results: dict = {}
     try:
-        _loop(tickers, p, done, bought, errors, results, max_positions, HourlyReport(update_every))
+        _loop(tickers, p, done, bought, errors, results, max_positions, HourlyReport(update_every),
+              UpAlerts(up_step, after_sale))
     finally:
         if bought:
             msg = day_summary(results)
@@ -388,12 +455,13 @@ def _fetch(tk, now, errors) -> pd.DataFrame | None:
     return bars
 
 
-def _loop(tickers, p, done, bought, errors, results, max_positions=None, report=None) -> None:
+def _loop(tickers, p, done, bought, errors, results, max_positions=None, report=None, ups=None) -> None:
     report = report or HourlyReport(0)
+    ups = ups or UpAlerts(0)
     index_bars = None
     prev = prev_closes(tickers) if p.entry == "breakout" and p.max_gap > 0 else {}
-    # keep going after the last sale while hourly "since sell" updates are still due today
-    while len(done) < len(tickers) or report.waiting(_last_check(_now())):
+    # after the last sale, keep watching sold stocks (after-sale rises, hourly "since sell")
+    while len(done) < len(tickers) or ups.watching() or report.waiting(_last_check(_now())):
         now = _now()
         close = session_close(now.date())
         if now.weekday() >= 5:
@@ -412,6 +480,8 @@ def _loop(tickers, p, done, bought, errors, results, max_positions=None, report=
             if got is not None and not got.empty:
                 index_bars = got
         skipped: dict[str, list[str]] = {}
+        up_lines: list[str] = []
+        prices: dict[str, float | None] = {}  # fetched this round (sold stocks reuse it)
         for tk in tickers:
             if tk in done:
                 continue
@@ -444,17 +514,24 @@ def _loop(tickers, p, done, bought, errors, results, max_positions=None, report=
                 notify.send(f"{action} {tk}\n{detail}")
             if tk in bought:
                 report.bought(tk, now)
+                ups.bought(tk)
+            prices[tk] = float(bars["close"].iloc[-1])
             if action == "SELL":
                 t = simulate_session(bars, p, index_bars=index_bars, final=final, prev_close=prev.get(tk))
                 if t is not None:
                     log_trade(tk, t, p)
                     results[tk] = t
                     report.sold(tk, t, t.exit / (1 - p.slippage))  # market price, before costs
+                    ups.sold(tk, t, t.exit / (1 - p.slippage))
                 else:
                     report.drop(tk)
+                    ups.drop(tk)
                 done.add(tk)
             elif action in ("BUY", "HOLD") and tk in bought:
-                report.update(tk, float(bars["close"].iloc[-1]), entry_point(bars, p), sell_line(bars, p))
+                entry, line = entry_point(bars, p), sell_line(bars, p)
+                report.update(tk, prices[tk], entry, line)
+                if (msg := ups.check(tk, prices[tk], entry, line)) is not None:
+                    up_lines.append(msg)
             if action == "SKIP":
                 why = (f"no breakout by {p.last_entry}" if detail.startswith("no close above")
                        else f"gapped up more than {p.max_gap * 100:.0f}% (big gap-ups tend to fade)"
@@ -463,10 +540,24 @@ def _loop(tickers, p, done, bought, errors, results, max_positions=None, report=
                 done.add(tk)
         for why, tks in skipped.items():
             notify.send(f"SKIP {', '.join(tks)}\n{why}")
-        if report.due(now, final):
-            for tk in report.sold_tickers():  # sold stocks are no longer checked: fetch a fresh price
-                b = _fetch(tk, now, errors)
-                report.update(tk, None if b is None or b.empty else float(b["close"].iloc[-1]))
+        # sold stocks are no longer run through the rules: fetch a fresh price when needed
+        hourly = report.due(now, final)
+        watch = set(ups.sold_tickers()) if not final else set()
+        if hourly:
+            watch |= set(report.sold_tickers())
+        for tk in sorted(watch - set(prices)):
+            b = _fetch(tk, now, errors)
+            prices[tk] = None if b is None or b.empty else float(b["close"].iloc[-1])
+        for tk in ups.sold_tickers() if not final else []:
+            if (msg := ups.check(tk, prices.get(tk))) is not None:
+                up_lines.append(msg)
+        if up_lines:
+            msg = up_message(now, up_lines)
+            print(msg)
+            notify.send(msg)
+        if hourly:
+            for tk in report.sold_tickers():
+                report.update(tk, prices.get(tk))
             msg = report.message(now)
             print(msg)
             notify.send(msg)
@@ -476,7 +567,8 @@ def _loop(tickers, p, done, bought, errors, results, max_positions=None, report=
         time.sleep(180 - (time.time() % 180) + 15)
 
 
-def replay(ticker: str, day: str, p: Params, update_every: int = 60) -> None:
+def replay(ticker: str, day: str, p: Params, update_every: int = 0, up_step: float = 0.01,
+           after_sale: bool = True) -> None:
     from .data import fetch_intraday
 
     d = pd.Timestamp(day).date()
@@ -493,12 +585,14 @@ def replay(ticker: str, day: str, p: Params, update_every: int = 60) -> None:
         dd = yf.download(ticker, start=pd.Timestamp(d) - pd.Timedelta(days=10), end=pd.Timestamp(d),
                          interval="1d", progress=False, auto_adjust=True, multi_level_index=False)
         pc = float(dd["Close"].iloc[-1]) if not dd.empty else None
-    report, sold = HourlyReport(update_every), False
+    report, ups, sold = HourlyReport(update_every), UpAlerts(up_step, after_sale), False
     for n in range(1, len(bars) + 1):
         sub, final = bars.iloc[:n], n == len(bars)
         now = bars.index[n - 1] + pd.Timedelta(minutes=3)  # when the live monitor would see this bar
-        if sold:  # only the hourly "since sell" updates are left
-            report.update(ticker, float(sub["close"].iloc[-1]))
+        price, up = float(sub["close"].iloc[-1]), None
+        if sold:  # only the after-sale updates are left
+            report.update(ticker, price)
+            up = None if final else ups.check(ticker, price)
         else:
             sub_idx = None if idx is None else idx[idx.index <= bars.index[n - 1]]
             action, detail = decide(sub, p, final=final, index_bars=sub_idx, prev_close=pc)
@@ -507,19 +601,24 @@ def replay(ticker: str, day: str, p: Params, update_every: int = 60) -> None:
                 break
             if action in ("BUY", "HOLD", "SELL"):
                 report.bought(ticker, now)
+                ups.bought(ticker)
             if action == "SELL":
                 t = simulate_session(sub, p, index_bars=sub_idx, final=final, prev_close=pc)
-                if t is None or not report.pos:
+                if t is None:
                     break
                 report.sold(ticker, t, t.exit / (1 - p.slippage))
+                ups.sold(ticker, t, t.exit / (1 - p.slippage))
                 sold = True
             elif action in ("BUY", "HOLD"):
-                report.update(ticker, float(sub["close"].iloc[-1]), entry_point(sub, p), sell_line(sub, p))
+                entry, line = entry_point(sub, p), sell_line(sub, p)
+                report.update(ticker, price, entry, line)
+                up = ups.check(ticker, price, entry, line)
+        if up is not None:
+            print(up_message(now, [up]))
         if report.due(now, final=now >= _last_check(now)):
             print(report.message(now))
-        if sold and not report.waiting(_last_check(now)):
+        if sold and not ups.watching() and not report.waiting(_last_check(now)):  # nothing left to show
             break
-
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
@@ -529,8 +628,12 @@ if __name__ == "__main__":
     ap.add_argument("--scan", type=int, metavar="N", help="let the scanner pick the top N stocks at 09:20 NY")
     ap.add_argument("--scan-target", type=float, default=0.03, help="scanner: rise from the open to look for (0.03 = 3%%)")
     ap.add_argument("--max-positions", type=int, help="at most this many BUYs per day")
-    ap.add_argument("--update-every", type=int, default=60, metavar="MIN",
-                    help="update on bought stocks every MIN minutes, on the clock (0 = off)")
+    ap.add_argument("--up-step", type=float, default=0.01, metavar="X",
+                    help="alert each time a bought stock is up another X, any time (0.01 = every +1%%; 0 = off)")
+    ap.add_argument("--no-after-sale", action="store_true",
+                    help="no PRICE UP alerts for stocks already sold today")
+    ap.add_argument("--update-every", type=int, default=0, metavar="MIN",
+                    help="also an update on bought stocks every MIN minutes on the clock, e.g. 60 (0 = off)")
     ap.add_argument("--replay", help="YYYY-MM-DD: replay that day instead of going live")
     ap.add_argument("--entry", choices=["open", "breakout"], default="open")
     ap.add_argument("--delay", type=int, default=2, help="3-min bars to wait after the open (entry=open)")
@@ -557,10 +660,11 @@ if __name__ == "__main__":
     if a.replay:
         if not a.tickers:
             ap.error("--replay needs a ticker")
-        replay(a.tickers[0], a.replay, params, a.update_every)
+        replay(a.tickers[0], a.replay, params, a.update_every, a.up_step, not a.no_after_sale)
     else:
         try:
-            run_live(a.tickers or scan_tickers(scan_n, a.scan_target, params), params, max_pos, a.update_every)
+            run_live(a.tickers or scan_tickers(scan_n, a.scan_target, params), params, max_pos,
+                     a.update_every, a.up_step, not a.no_after_sale)
         except KeyboardInterrupt:
             print("Stopped.")
         except Exception as e:
