@@ -101,9 +101,10 @@ on the next check; you get a Telegram warning if a stock keeps failing or the mo
 
 1. 09:20 NY: the scanner sends the 15 liquid stocks that most often rose 3%+ after the open.
 2. 09:39 NY: if QQQ is below its open, **no trades today** (you get one SKIP message).
-3. Otherwise wait for each stock to close above its 09:30-10:15 high. First 5 that do so
+3. Skip any stock that opened more than 3% above yesterday's close (big gap-ups tend to fade).
+4. Otherwise wait for each stock to close above its 09:30-10:15 high. First 5 that do so
    before 11:00 get a BUY alert. Stocks that never break out are skipped.
-4. Exit: stop 3%; once up 0.5%, sell after giving back 40% of the best gain; else at the close.
+5. Exit: stop 3%; once up 0.5%, sell after giving back 40% of the best gain; else at the close.
    No fixed take-profit and no "choppy" exit (both lowered results in the test).
 
 Tested on Yahoo data, Sep 2 - Nov 25 2026, ~100 stocks, top-15 candidates per day:
@@ -112,14 +113,24 @@ Tested on Yahoo data, Sep 2 - Nov 25 2026, ~100 stocks, top-15 candidates per da
 |---|---|---|---|---|
 | Old: buy 6 min after open, top 5 | 300 | 48% | -0.20% | -0.40 / -0.01 |
 | Breakout without the QQQ filter | 252 | 60% | -0.04% | -0.25 / +0.16 |
-| **Recommended, first 5 per day** | 77 | **73%** | **+0.64%** | +0.27 / +0.88 |
+| Breakout + QQQ, first 5 per day | 77 | 73% | +0.64% | +0.27 / +0.88 |
+| **Recommended (+ skip gap-ups > 3%, costs 0.1%/side)** | 69 | **77%** | **+0.73%** | +0.28 / +1.02 |
+| Same with costs 0.2%/side (pessimistic) | 69 | 71% | +0.55% | +0.30 / +0.71 |
 | Same, without its 3 best days | - | 68% | +0.06% | - |
 | Same rules on 3-min bars (19 days, overlaps) | 41 | 83% | +0.44% | +0.26 / +1.15 |
 
-What did NOT help: a fixed take-profit (win rate unchanged, return lower), the uptrend
+The gap rule was chosen on the first 30 days only and then improved the last 30 days too; it
+also matches 2 years of daily data (gap-ups > 3% averaged -0.28% open-to-close).
+
+What did NOT help: stock-vs-QQQ strength, QQQ still green at the breakout, breakout-bar
+volume, opening-range width, a fixed take-profit (win rate unchanged, return lower), the uptrend
 filter, volatility-scaled stops, relative-volume and gap filters, a 13-feature model.
 
-Limits, read these: 60 days is still a small sample and covers one market period. The
+Limits, read these: 60 days is still a small sample and covers one market period.
+Yahoo has no older 5-minute data. A coarser 1-hour version of the same idea over 2 years
+was only break-even (52% wins, -0.02%), and it also lost on these same 60 days (-0.36%),
+so the edge depends on the 5-minute details and may be fragile: only live paper trading
+can confirm it. The
 result leans on strong market days (without the best 3 days it is close to break-even),
 trades happen on only about half the days, and some days lose 3% (stop-outs). Live
 fills will differ from the backtest. Paper-trade it for several weeks first.

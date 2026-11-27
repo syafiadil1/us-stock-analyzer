@@ -20,6 +20,8 @@ Entry modes:
                       bars that start before `or_end`) no later than `last_entry`.
                       Buy at the next bar's open. In a 60-day test on ~100 stocks this
                       raised the win rate from ~48% to ~73% (see README).
+                      max_gap: also skip stocks that opened more than max_gap above
+                      yesterday's close (big gap-ups tended to fade in 2 years of data).
 
 Decisions use bar CLOSES only (like glancing at the chart every 3 minutes),
 which is a conservative simplification: intrabar spikes are ignored.
@@ -48,6 +50,7 @@ class Params:
     last_entry: str = "11:00"      # breakout: no new entries for bars starting after this
     market_filter: bool = True     # breakout: require QQQ above its open...
     market_check: str = "09:39"    # ...using the bars that start before this time
+    max_gap: float = 0.0           # breakout: skip if it opened > this above yesterday's close (0 = off)
 
 
 @dataclass(frozen=True)
@@ -125,12 +128,21 @@ def breakout_entry(bars: pd.DataFrame, p: Params) -> int | None:
     return None
 
 
+def gap_too_big(bars: pd.DataFrame, prev_close: float | None, p: Params) -> bool:
+    """True when the max_gap rule says skip (unknown prev_close = do not skip)."""
+    if p.max_gap <= 0 or not prev_close or bars.empty:
+        return False
+    return float(bars["open"].iloc[0]) / prev_close - 1 > p.max_gap
+
+
 def simulate_session(bars: pd.DataFrame, p: Params = Params(), index_bars: pd.DataFrame | None = None,
-                     final: bool = True) -> Trade | None:
+                     final: bool = True, prev_close: float | None = None) -> Trade | None:
     """One trading day with either entry mode. None = no trade (or still holding when final=False)."""
     if p.entry == "open":
         return simulate_day(bars, p, final=final)
     if p.market_filter and not market_ok(index_bars, p):
+        return None
+    if gap_too_big(bars, prev_close, p):
         return None
     k = breakout_entry(bars, p)
     if k is None or k >= len(bars):
@@ -190,6 +202,7 @@ def simulate_day(bars: pd.DataFrame, p: Params = Params(), final: bool = True) -
 
 
 # Settings that held up best in the 60-day, ~100-stock test (README "Recommended setup").
+# slippage 0.1%/side is deliberately pessimistic for these fast, cheaper stocks.
 RECOMMENDED = Params(entry="breakout", or_end="10:15", last_entry="11:00", market_filter=True,
-                     stop_loss=0.03, take_profit=0.0, trail_drop=0.0, giveback=0.4,
-                     giveback_arm=0.005, chop_flips=0, entry_delay=0)
+                     max_gap=0.03, stop_loss=0.03, take_profit=0.0, trail_drop=0.0, giveback=0.4,
+                     giveback_arm=0.005, chop_flips=0, entry_delay=0, slippage=0.001)

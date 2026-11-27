@@ -21,7 +21,7 @@ import pandas as pd
 
 from . import notify
 from .data import NY, to_3min
-from .strategy import (RECOMMENDED, Params, breakout_entry, giveback_price, market_ok,
+from .strategy import (RECOMMENDED, Params, breakout_entry, gap_too_big, giveback_price, market_ok,
                        opening_range_high, simulate_day, simulate_session)
 
 JOURNAL = Path("paper_trades.csv")
@@ -72,12 +72,12 @@ def _sell_detail(t) -> str:
 
 
 def decide(bars: pd.DataFrame, p: Params, final: bool = False,
-           index_bars: pd.DataFrame | None = None) -> tuple[str, str]:
+           index_bars: pd.DataFrame | None = None, prev_close: float | None = None) -> tuple[str, str]:
     """Return (action, detail) for a day's 3-min bars so far.
 
     Actions: WAIT, BUY (fires once, on the entry bar), HOLD, SELL, SKIP (no trade today)."""
     if p.entry == "breakout":
-        return _decide_breakout(bars, p, final, index_bars)
+        return _decide_breakout(bars, p, final, index_bars, prev_close)
     day = bars.iloc[p.entry_delay:]
     if len(day) < 1:
         return "WAIT", f"waiting for entry (delay {p.entry_delay} bars)"
@@ -89,13 +89,15 @@ def decide(bars: pd.DataFrame, p: Params, final: bool = False,
     return "HOLD", _hold_detail(day, p)
 
 
-def _decide_breakout(bars, p, final, index_bars) -> tuple[str, str]:
+def _decide_breakout(bars, p, final, index_bars, prev_close=None) -> tuple[str, str]:
     if p.market_filter:
         ok = market_ok(index_bars, p)
         if ok is None:
             return ("SKIP", "no market data") if final else ("WAIT", f"checking {INDEX} until {p.market_check}")
         if not ok:
             return "SKIP", f"{INDEX} below its open after ~10 min: no trade today"
+    if gap_too_big(bars, prev_close, p):
+        return "SKIP", f"gapped up {(bars['open'].iloc[0] / prev_close - 1) * 100:+.1f}% at the open"
     hi = opening_range_high(bars, p)
     if hi is None:
         return ("SKIP", "no data") if final else ("WAIT", f"opening range forming until {p.or_end}")
@@ -152,6 +154,30 @@ def fetch_today(ticker: str) -> pd.DataFrame:
     b = to_3min(raw)
     today = pd.Timestamp.now(tz=NY).date()
     return b[b.index.date == today]  # on holidays Yahoo returns the previous session: ignore it
+
+
+def prev_closes(tickers: list[str]) -> dict[str, float]:
+    """Yesterday's close for each ticker (for the gap rule). Missing = gap rule not applied."""
+    import yfinance as yf
+
+    out: dict[str, float] = {}
+    try:
+        raw = yf.download(tickers, period="7d", interval="1d", progress=False,
+                          auto_adjust=True, group_by="ticker", threads=True)
+    except Exception as e:
+        print(f"previous-close download failed ({type(e).__name__}): gap rule off today")
+        return out
+    today = pd.Timestamp.now(tz=NY).date()
+    for tk in tickers:
+        try:
+            d = raw[tk] if isinstance(raw.columns, pd.MultiIndex) else raw
+            d = d.dropna(subset=["Close"])
+            d = d[pd.DatetimeIndex(d.index).date < today]
+            if not d.empty:
+                out[tk] = float(d["Close"].iloc[-1])
+        except KeyError:
+            pass
+    return out
 
 
 def wait_until(hhmm: str) -> bool:
@@ -216,6 +242,7 @@ def _fetch(tk, now, errors) -> pd.DataFrame | None:
 
 def _loop(tickers, p, done, bought, errors, results, max_positions=None) -> None:
     index_bars = None
+    prev = prev_closes(tickers) if p.entry == "breakout" and p.max_gap > 0 else {}
     while len(done) < len(tickers):
         now = pd.Timestamp.now(tz=NY)
         close = session_close(now.date())
@@ -246,7 +273,7 @@ def _loop(tickers, p, done, bought, errors, results, max_positions=None) -> None
                     print(f"{tk}: no data for today after 09:50 NY (holiday?). Skipping.")
                     done.add(tk)
                 continue
-            action, detail = decide(bars, p, final=final, index_bars=index_bars)
+            action, detail = decide(bars, p, final=final, index_bars=index_bars, prev_close=prev.get(tk))
             if action == "BUY":
                 if tk in bought:  # already announced; same entry bar seen twice
                     action, detail = "HOLD", "in position"
@@ -266,13 +293,15 @@ def _loop(tickers, p, done, bought, errors, results, max_positions=None) -> None
             if action in ("BUY", "SELL"):
                 notify.send(f"{action} {tk}\n{detail}")
             if action == "SELL":
-                t = simulate_session(bars, p, index_bars=index_bars, final=final)
+                t = simulate_session(bars, p, index_bars=index_bars, final=final, prev_close=prev.get(tk))
                 if t is not None:
                     log_trade(tk, t, p)
                     results[tk] = t
                 done.add(tk)
             if action == "SKIP":
-                why = f"no breakout by {p.last_entry}" if detail.startswith("no close above") else detail
+                why = (f"no breakout by {p.last_entry}" if detail.startswith("no close above")
+                       else f"gapped up more than {p.max_gap * 100:.0f}% (big gap-ups tend to fade)"
+                       if detail.startswith("gapped up") else detail)
                 skipped.setdefault(why, []).append(tk)
                 done.add(tk)
         for why, tks in skipped.items():
@@ -290,13 +319,18 @@ def replay(ticker: str, day: str, p: Params) -> None:
     bars = all_bars[all_bars.index.date == d]
     if bars.empty:
         raise SystemExit(f"No data for {ticker} on {day}")
-    idx = None
+    idx, pc = None, None
     if p.entry == "breakout" and p.market_filter:
         q = fetch_intraday(INDEX)
         idx = q[q.index.date == d]
+    if p.entry == "breakout" and p.max_gap > 0:
+        import yfinance as yf
+        dd = yf.download(ticker, start=pd.Timestamp(d) - pd.Timedelta(days=10), end=pd.Timestamp(d),
+                         interval="1d", progress=False, auto_adjust=True, multi_level_index=False)
+        pc = float(dd["Close"].iloc[-1]) if not dd.empty else None
     for n in range(1, len(bars) + 1):
         sub_idx = None if idx is None else idx[idx.index <= bars.index[n - 1]]
-        action, detail = decide(bars.iloc[:n], p, final=(n == len(bars)), index_bars=sub_idx)
+        action, detail = decide(bars.iloc[:n], p, final=(n == len(bars)), index_bars=sub_idx, prev_close=pc)
         print(f"{bars.index[n - 1]:%H:%M} {ticker} {action:5s} {detail}")
         if action in ("SELL", "SKIP"):
             break

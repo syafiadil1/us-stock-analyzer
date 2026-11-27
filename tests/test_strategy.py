@@ -246,3 +246,13 @@ def test_session_close_early_days():
     assert session_close(dt.date(2027, 11, 26)) == "13:00"
     assert session_close(dt.date(2026, 12, 24)) == "13:00"
     assert session_close(dt.date(2026, 11, 25)) == "16:00"
+
+
+def test_gap_up_rule_skips_big_gap_ups():
+    from stock_analyzer.monitor import decide
+    bars = day(OR_BARS + [101.5, 102, 103, 104, 103.5, 102.5, 102.2, 102.0])  # opens at 100
+    assert simulate_session(bars, BRK, index_bars=qqq(True), prev_close=96.0) is None   # +4.2% gap
+    assert simulate_session(bars, BRK, index_bars=qqq(True), prev_close=98.0) is not None  # +2.0%
+    assert simulate_session(bars, BRK, index_bars=qqq(True), prev_close=None) is not None  # unknown: trade
+    action, detail = decide(bars, BRK, index_bars=qqq(True), prev_close=96.0)
+    assert action == "SKIP" and "gapped up +4.2%" in detail
