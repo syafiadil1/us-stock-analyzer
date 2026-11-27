@@ -5,6 +5,10 @@
 # Telegram (optional): put the two export lines in ~/.stock_env (chmod 600), see README.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+if pgrep -f "[p]ython[0-9.]* -m stock_analyzer[.]monitor" >/dev/null; then
+  echo "$(date '+%F %T') A monitor is already running; not starting a second one (no duplicate alerts)."
+  exit 0
+fi
 command -v python3 >/dev/null || { echo "Install Python first: https://www.python.org/downloads/ or 'brew install python'"; exit 1; }
 [ -d .venv ] || python3 -m venv .venv
 .venv/bin/pip install -q -r requirements.txt

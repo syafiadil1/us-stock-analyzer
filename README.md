@@ -58,6 +58,18 @@ Cron starts the monitor at 09:25 New York time every weekday; edit the tickers i
     bash deploy/mac_run.sh NVDA TSLA AMD   # your own list, older rules
 
 Uses `caffeinate` so the Mac does not sleep while the monitor runs. Keep it plugged in.
+It refuses to start a second copy, so you never get duplicate alerts.
+
+### Auto-start every weekday (no terminal or Claude app needed)
+
+    bash deploy/mac_autostart.sh            # install: Mon-Fri 21:00 Mac time
+    bash deploy/mac_autostart.sh --status   # installed? running? last log lines
+    bash deploy/mac_autostart.sh --remove   # uninstall
+
+21:00 Malaysia time is before the 09:20 New York scan in both US summer and winter time.
+Output goes to `monitor.log`. The Mac must be on and awake then (plugged in, lid open); if it
+is asleep, macOS starts the job when it wakes. To wake it automatically:
+`sudo pmset repeat wakeorpoweron MTWRF 20:55:00`.
 
 ## Scanner + give-back sell alert
 
