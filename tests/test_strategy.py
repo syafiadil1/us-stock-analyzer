@@ -183,3 +183,66 @@ def test_scanner_split_handles_batch_and_single():
     out = _split(batch, ["AAA", "BBB", "CCC"])
     assert list(out) == ["AAA"]  # BBB empty, CCC missing
     assert list(_split(one, ["ZZZ"])) == ["ZZZ"]
+
+
+# ---------- breakout entry (RECOMMENDED preset) ----------
+from stock_analyzer.strategy import (RECOMMENDED, breakout_entry, market_ok,  # noqa: E402
+                                     opening_range_high, simulate_session)
+from dataclasses import replace as _replace  # noqa: E402
+
+BRK = _replace(RECOMMENDED, slippage=0.0)
+OR_BARS = [100, 100.5, 101, 100.6, 100.2, 100.4, 100.8, 100.3, 100.1, 100.5, 100.7, 100.2, 100.4, 100.6, 100.5]
+
+
+def qqq(green=True, n=40):
+    step = 0.05 if green else -0.05
+    return day([100 + step * (i + 1) for i in range(n)])
+
+
+def test_market_filter_known_after_first_bars():
+    assert market_ok(qqq(True), BRK) is True
+    assert market_ok(qqq(False), BRK) is False
+    assert market_ok(qqq(True, n=3), BRK) is None  # only 09:30-09:36 bars: not known yet
+
+
+def test_breakout_buys_bar_after_close_above_opening_range():
+    closes = OR_BARS + [101.5, 102, 103, 104, 103.5, 102.5, 102.2, 102.0]  # 10:15 bar closes above 101
+    bars = day(closes)
+    assert opening_range_high(bars, BRK) == 101
+    assert breakout_entry(bars, BRK) == 16
+    t = simulate_session(bars, BRK, index_bars=qqq(True))
+    assert t is not None and t.entry == bars["open"].iloc[16] and t.reason == "GIVEBACK"
+
+
+def test_no_trade_when_market_red_or_no_breakout_in_time():
+    bars = day(OR_BARS + [101.5, 102, 103, 104])
+    assert simulate_session(bars, BRK, index_bars=qqq(False)) is None
+    late = day(OR_BARS + [100.5] * 17 + [102, 103])  # first close above 101 is the 11:06 bar
+    assert breakout_entry(late, BRK) is None
+
+
+def test_decide_breakout_states():
+    from stock_analyzer.monitor import decide
+    bars = day(OR_BARS + [101.5, 102, 103, 104, 103.5, 102.5, 102.2, 102.0])
+    acts = [decide(bars.iloc[:n], BRK, index_bars=qqq(True))[0] for n in range(1, len(bars) + 1)]
+    assert acts[:15] == ["WAIT"] * 15                 # opening range still forming
+    assert acts[15] == "BUY"                          # 10:15 bar closed above the range high
+    assert "SELL" in acts and acts.index("SELL") > 16
+    assert decide(bars, BRK, index_bars=qqq(False))[0] == "SKIP"
+    flat = day(OR_BARS + [100.5] * 20)
+    assert decide(flat, BRK, index_bars=qqq(True))[0] == "SKIP"   # past 11:00, no breakout
+
+
+def test_chop_rule_can_be_turned_off():
+    closes = [100, 100.4, 99.9, 100.4, 99.9, 100.4, 99.9, 100.4, 99.9, 100.4, 99.9, 100.2]
+    t = simulate_day(day(closes), Params(slippage=0.0, trail_drop=0.05, stop_loss=0.05, chop_flips=0))
+    assert t.reason == "END_OF_DAY"
+
+
+def test_session_close_early_days():
+    import datetime as dt
+    from stock_analyzer.monitor import session_close
+    assert session_close(dt.date(2026, 11, 27)) == "13:00"   # day after Thanksgiving
+    assert session_close(dt.date(2027, 11, 26)) == "13:00"
+    assert session_close(dt.date(2026, 12, 24)) == "13:00"
+    assert session_close(dt.date(2026, 11, 25)) == "16:00"

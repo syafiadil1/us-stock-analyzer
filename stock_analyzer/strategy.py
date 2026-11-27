@@ -13,12 +13,20 @@ Rules (from the trader's own routine):
   * Extra safety (not in the original routine, defaults can be tuned):
     hard STOP_LOSS and forced sale at the close (no overnight risk).
 
+Entry modes:
+  * entry="open"      buy `entry_delay` bars after the open (the original routine).
+  * entry="breakout"  only buy if the market (QQQ) is above its open after ~10 min,
+                      and the stock closes above its opening-range high (the high of the
+                      bars that start before `or_end`) no later than `last_entry`.
+                      Buy at the next bar's open. In a 60-day test on ~100 stocks this
+                      raised the win rate from ~48% to ~73% (see README).
+
 Decisions use bar CLOSES only (like glancing at the chart every 3 minutes),
 which is a conservative simplification: intrabar spikes are ignored.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import pandas as pd
 
@@ -35,6 +43,11 @@ class Params:
     chop_flips: int = 4            # this many direction flips inside the window = choppy
     slippage: float = 0.0005       # 0.05% worse fill on each side
     entry_delay: int = 0           # wait this many 3-min bars after the open before buying
+    entry: str = "open"            # "open" or "breakout" (see module docstring)
+    or_end: str = "10:15"          # breakout: opening range = bars starting before this time
+    last_entry: str = "11:00"      # breakout: no new entries for bars starting after this
+    market_filter: bool = True     # breakout: require QQQ above its open...
+    market_check: str = "09:39"    # ...using the bars that start before this time
 
 
 @dataclass(frozen=True)
@@ -50,8 +63,8 @@ class Trade:
 
 
 def _is_choppy(closes: list[float], p: Params) -> bool:
-    """True when the last `chop_window` bars show many fast direction flips."""
-    if len(closes) < p.chop_window + 1:
+    """True when the last `chop_window` bars show many fast direction flips (chop_flips=0: off)."""
+    if p.chop_flips <= 0 or len(closes) < p.chop_window + 1:
         return False
     window = closes[-(p.chop_window + 1):]
     moves = [b / a - 1 for a, b in zip(window[:-1], window[1:])]
@@ -65,6 +78,64 @@ def giveback_price(entry: float, peak: float, p: Params) -> float | None:
     if p.giveback <= 0 or peak / entry - 1 < p.giveback_arm:
         return None
     return entry + (peak - entry) * (1 - p.giveback)
+
+
+def _hhmm(ts) -> str:
+    return pd.Timestamp(ts).strftime("%H:%M")
+
+
+def _before(bars: pd.DataFrame, hhmm: str) -> pd.DataFrame:
+    return bars[[_hhmm(t) < hhmm for t in bars.index]]
+
+
+def market_ok(index_bars: pd.DataFrame | None, p: Params) -> bool | None:
+    """Is the market index (QQQ) above its open after the first bars? None = not known yet
+    (the check is known once a bar starting at/after market_check exists)."""
+    if index_bars is None or index_bars.empty or _hhmm(index_bars.index[-1]) < p.market_check:
+        return None
+    early = _before(index_bars, p.market_check)
+    if early.empty:
+        return None
+    return bool(early["close"].iloc[-1] > early["open"].iloc[0])
+
+
+def opening_range_high(bars: pd.DataFrame, p: Params) -> float | None:
+    """High of the opening range, or None while it is still forming."""
+    if bars.empty or _hhmm(bars.index[-1]) < p.or_end:
+        return None
+    rng = _before(bars, p.or_end)
+    return None if rng.empty else float(rng["high"].max())
+
+
+def breakout_entry(bars: pd.DataFrame, p: Params) -> int | None:
+    """Index of the entry bar (= the bar AFTER the first close above the opening-range
+    high), or None if there is no breakout (yet). May equal len(bars) in live use:
+    the breakout bar just closed and the entry is "now"."""
+    hi = opening_range_high(bars, p)
+    if hi is None:
+        return None
+    for i, (ts, c) in enumerate(zip(bars.index, bars["close"])):
+        t = _hhmm(ts)
+        if t < p.or_end:
+            continue
+        if t > p.last_entry:
+            return None
+        if c > hi:
+            return i + 1
+    return None
+
+
+def simulate_session(bars: pd.DataFrame, p: Params = Params(), index_bars: pd.DataFrame | None = None,
+                     final: bool = True) -> Trade | None:
+    """One trading day with either entry mode. None = no trade (or still holding when final=False)."""
+    if p.entry == "open":
+        return simulate_day(bars, p, final=final)
+    if p.market_filter and not market_ok(index_bars, p):
+        return None
+    k = breakout_entry(bars, p)
+    if k is None or k >= len(bars):
+        return None
+    return simulate_day(bars.iloc[k:], replace(p, entry_delay=0), final=final)
 
 
 def simulate_day(bars: pd.DataFrame, p: Params = Params(), final: bool = True) -> Trade | None:
@@ -116,3 +187,9 @@ def simulate_day(bars: pd.DataFrame, p: Params = Params(), final: bool = True) -
                 max_run_up=max_run_up,
             )
     return None
+
+
+# Settings that held up best in the 60-day, ~100-stock test (README "Recommended setup").
+RECOMMENDED = Params(entry="breakout", or_end="10:15", last_entry="11:00", market_filter=True,
+                     stop_loss=0.03, take_profit=0.0, trail_drop=0.0, giveback=0.4,
+                     giveback_arm=0.005, chop_flips=0, entry_delay=0)

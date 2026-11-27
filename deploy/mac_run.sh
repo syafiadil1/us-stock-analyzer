@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # macOS: set up once, then run the monitor with the Mac kept awake.
-#   bash deploy/mac_run.sh                # recommended: scanner picks 5, tested exit rules
+#   bash deploy/mac_run.sh                # recommended: scanner + breakout entry (tested setup)
 #   bash deploy/mac_run.sh NVDA TSLA AMD  # or watch your own list with the older rules
 # Telegram (optional): put the two export lines in ~/.stock_env (chmod 600), see README.
 set -euo pipefail
@@ -11,7 +11,7 @@ command -v python3 >/dev/null || { echo "Install Python first: https://www.pytho
 [ -f "$HOME/.stock_env" ] && . "$HOME/.stock_env"
 TICKERS=("$@")
 # Default = settings that held up best in the backtest (see README "Recommended setup").
-[ ${#TICKERS[@]} -gt 0 ] || TICKERS=(--scan 5 --scan-target 0.03 --giveback 0.4 --giveback-arm 0.01 --stop-loss 0.03 --take-profit 0 --trail-drop 0)
+[ ${#TICKERS[@]} -gt 0 ] || TICKERS=(--preset recommended)
 if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
   .venv/bin/python -c "from stock_analyzer import notify; print('Telegram test sent:', notify.send('Mac monitor ready'))"
 else

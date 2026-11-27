@@ -85,20 +85,29 @@ on the next check; you get a Telegram warning if a stock keeps failing or the mo
 
 ## Recommended setup (what the tests showed)
 
-`bash deploy/mac_run.sh` with no options = scanner picks 5 of ~100 stocks at 09:20 NY, buys
-6 minutes after the open, stop 3%, give-back starts at +1% and sells after 40% is handed back.
+`bash deploy/mac_run.sh` (= `--preset recommended`):
 
-Tested on Yahoo data (Nov 2026), judged on data the settings were not picked on:
+1. 09:20 NY: the scanner sends the 15 liquid stocks that most often rose 3%+ after the open.
+2. 09:39 NY: if QQQ is below its open, **no trades today** (you get one SKIP message).
+3. Otherwise wait for each stock to close above its 09:30-10:15 high. First 5 that do so
+   before 11:00 get a BUY alert. Stocks that never break out are skipped.
+4. Exit: stop 3%; once up 0.5%, sell after giving back 40% of the best gain; else at the close.
+   No fixed take-profit and no "choppy" exit (both lowered results in the test).
 
-| Check | Result |
-|---|---|
-| Top-5 picks that hit +3% after the open, 2 years daily, 30 stocks | 41% of picks |
-| Same, ~100 stocks | 50% (ranking by daily range: 52%; a 13-feature model: 53%, not worth it) |
-| Average open-to-close of those picks | about 0%: it predicts MOVEMENT, not direction |
-| Uptrend filter / market-gap filter | no improvement, not used |
-| 20 days intraday, top-5 picks, stop 1.5% + 50% give-back | -0.1% to -0.2% per trade |
-| Same, stop 3% + arm 1% + 40% give-back | +0.1% to +0.5% per trade, 50-66% wins |
-| Stops scaled to each stock's volatility | no better than fixed 3% |
+Tested on Yahoo data, Sep 2 - Nov 25 2026, ~100 stocks, top-15 candidates per day:
 
-20 days is a small sample and picks cluster in a few volatile names (crypto miners, MRNA...).
-Paper-trade it for several weeks and review `paper_trades.csv` before trusting it.
+| Setup | Trades | Win rate | Avg per trade | 1st / 2nd half |
+|---|---|---|---|---|
+| Old: buy 6 min after open, top 5 | 300 | 48% | -0.20% | -0.40 / -0.01 |
+| Breakout without the QQQ filter | 252 | 60% | -0.04% | -0.25 / +0.16 |
+| **Recommended, first 5 per day** | 77 | **73%** | **+0.64%** | +0.27 / +0.88 |
+| Same, without its 3 best days | - | 68% | +0.06% | - |
+| Same rules on 3-min bars (19 days, overlaps) | 41 | 83% | +0.44% | +0.26 / +1.15 |
+
+What did NOT help: a fixed take-profit (win rate unchanged, return lower), the uptrend
+filter, volatility-scaled stops, relative-volume and gap filters, a 13-feature model.
+
+Limits, read these: 60 days is still a small sample and covers one market period. The
+result leans on strong market days (without the best 3 days it is close to break-even),
+trades happen on only about half the days, and some days lose 3% (stop-outs). Live
+fills will differ from the backtest. Paper-trade it for several weeks first.

@@ -1,49 +1,117 @@
 """Live paper-trading monitor (alerts only, no orders, no API key).
 
-    python -m stock_analyzer.monitor NVDA TSLA AMD
-    python -m stock_analyzer.monitor NVDA --replay 2026-11-20      # replay a past day
-    python -m stock_analyzer.monitor --scan 5 --giveback 0.6       # scanner picks 5, sell on 60% give-back
+    python -m stock_analyzer.monitor --preset recommended          # what deploy/mac_run.sh runs
+    python -m stock_analyzer.monitor NVDA TSLA AMD                 # your own list, buy at the open
+    python -m stock_analyzer.monitor NVDA --replay 2026-11-20 --preset recommended   # replay a day
 
-Starts at the open, re-checks every 3 minutes with the SAME rules as the
-backtest, prints BUY / HOLD / SELL and writes closed paper trades to
-paper_trades.csv. Yahoo's free feed can lag, so treat prices as approximate.
+Re-checks every 3 minutes with the SAME rules as the backtest (strategy.py), prints
+WAIT / BUY / HOLD / SELL / SKIP and writes closed paper trades to paper_trades.csv.
+Yahoo's free feed can lag, so treat prices as approximate.
 """
 from __future__ import annotations
 
 import argparse
 import csv
+import datetime as dt
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import pandas as pd
 
 from . import notify
 from .data import NY, to_3min
-from .strategy import Params, giveback_price, simulate_day
+from .strategy import (RECOMMENDED, Params, breakout_entry, giveback_price, market_ok,
+                       opening_range_high, simulate_day, simulate_session)
 
 JOURNAL = Path("paper_trades.csv")
+INDEX = "QQQ"  # market filter for breakout mode
+
+PRESETS = {
+    # params, how many stocks the scanner hands over, max open positions per day
+    "recommended": (RECOMMENDED, 15, 5),
+}
 
 
-def decide(bars: pd.DataFrame, p: Params, final: bool = False) -> tuple[str, str]:
-    """Return (action, detail) for a day's 3-min bars so far."""
-    day = bars.iloc[p.entry_delay:]
-    if len(day) < 1:
-        return "WAIT", f"waiting for entry (delay {p.entry_delay} bars)"
+def session_close(day: dt.date) -> str:
+    """NYSE closing time: 13:00 on the day after Thanksgiving and on Dec 24 (Mon-Thu)."""
+    nov1 = dt.date(day.year, 11, 1)
+    thanksgiving = nov1 + dt.timedelta(days=(3 - nov1.weekday()) % 7 + 21)
+    if day == thanksgiving + dt.timedelta(days=1):
+        return "13:00"
+    if day.month == 12 and day.day == 24 and day.weekday() < 4:
+        return "13:00"
+    return "16:00"
+
+
+def _minus(hhmm: str, minutes: int) -> str:
+    h, m = map(int, hhmm.split(":"))
+    t = h * 60 + m - minutes
+    return f"{t // 60:02d}:{t % 60:02d}"
+
+
+def _hold_detail(day: pd.DataFrame, p: Params) -> str:
     entry = day["open"].iloc[0] * (1 + p.slippage)
-    t = simulate_day(bars, p, final=final)
-    if t is not None:
-        return "SELL", f"{t.reason} {t.ret * 100:+.2f}% (entry {t.entry:.2f} exit {t.exit:.2f})"
-    if len(day) == 1:
-        tp = f"take profit {entry * (1 + p.take_profit):.2f}" if p.take_profit > 0 else "no fixed take profit"
-        gb = f" | give-back {p.giveback * 100:.0f}% of gain" if p.giveback > 0 else ""
-        return "BUY", f"enter ~{entry:.2f} | {tp} | stop {entry * (1 - p.stop_loss):.2f}{gb}"
     pct = (day["close"].iloc[-1] / entry - 1) * 100
     peak = max(entry, float(day["close"].max()))
     detail = f"{pct:+.2f}% vs entry | best {(peak / entry - 1) * 100:+.2f}%"
     gb = giveback_price(entry, peak, p)
     if gb is not None:
         detail += f" | sell if below {gb:.2f}"
-    return "HOLD", detail
+    return detail
+
+
+def _buy_detail(entry: float, p: Params, extra: str = "") -> str:
+    tp = f"take profit {entry * (1 + p.take_profit):.2f}" if p.take_profit > 0 else "no fixed take profit"
+    gb = f" | give-back {p.giveback * 100:.0f}% of gain" if p.giveback > 0 else ""
+    return f"{extra}enter ~{entry:.2f} | {tp} | stop {entry * (1 - p.stop_loss):.2f}{gb}"
+
+
+def _sell_detail(t) -> str:
+    return f"{t.reason} {t.ret * 100:+.2f}% (entry {t.entry:.2f} exit {t.exit:.2f})"
+
+
+def decide(bars: pd.DataFrame, p: Params, final: bool = False,
+           index_bars: pd.DataFrame | None = None) -> tuple[str, str]:
+    """Return (action, detail) for a day's 3-min bars so far.
+
+    Actions: WAIT, BUY (fires once, on the entry bar), HOLD, SELL, SKIP (no trade today)."""
+    if p.entry == "breakout":
+        return _decide_breakout(bars, p, final, index_bars)
+    day = bars.iloc[p.entry_delay:]
+    if len(day) < 1:
+        return "WAIT", f"waiting for entry (delay {p.entry_delay} bars)"
+    t = simulate_day(bars, p, final=final)
+    if t is not None:
+        return "SELL", _sell_detail(t)
+    if len(day) == 1:
+        return "BUY", _buy_detail(day["open"].iloc[0] * (1 + p.slippage), p)
+    return "HOLD", _hold_detail(day, p)
+
+
+def _decide_breakout(bars, p, final, index_bars) -> tuple[str, str]:
+    if p.market_filter:
+        ok = market_ok(index_bars, p)
+        if ok is None:
+            return ("SKIP", "no market data") if final else ("WAIT", f"checking {INDEX} until {p.market_check}")
+        if not ok:
+            return "SKIP", f"{INDEX} below its open after ~10 min: no trade today"
+    hi = opening_range_high(bars, p)
+    if hi is None:
+        return ("SKIP", "no data") if final else ("WAIT", f"opening range forming until {p.or_end}")
+    k = breakout_entry(bars, p)
+    if k is None:
+        if final or bars.index[-1].strftime("%H:%M") >= p.last_entry:
+            return "SKIP", f"no close above {hi:.2f} by {p.last_entry}"
+        return "WAIT", f"waiting for a close above {hi:.2f} (opening-range high)"
+    if k == len(bars):  # breakout bar just closed: buy now
+        entry = float(bars["close"].iloc[-1]) * (1 + p.slippage)
+        return "BUY", _buy_detail(entry, p, extra=f"broke {hi:.2f} | ")
+    q = replace(p, entry_delay=0)
+    t = simulate_day(bars.iloc[k:], q, final=final)
+    if t is not None:
+        return "SELL", _sell_detail(t)
+    return "HOLD", _hold_detail(bars.iloc[k:], q)
 
 
 JOURNAL_COLS = ["date", "ticker", "entry", "exit", "reason", "ret_pct", "best_pct", "exit_time", "settings"]
@@ -56,8 +124,8 @@ def log_trade(ticker: str, t, p: Params, path: Path = JOURNAL) -> None:
         w = csv.writer(f)
         if new:
             w.writerow(JOURNAL_COLS)
-        settings = (f"tp={p.take_profit} sl={p.stop_loss} trail={p.trail_drop} "
-                    f"giveback={p.giveback} delay={p.entry_delay}")
+        settings = (f"entry={p.entry} tp={p.take_profit} sl={p.stop_loss} trail={p.trail_drop} "
+                    f"giveback={p.giveback} arm={p.giveback_arm} chop={p.chop_flips} delay={p.entry_delay}")
         w.writerow([t.date.date(), ticker, round(t.entry, 4), round(t.exit, 4), t.reason,
                     round(t.ret * 100, 3), round(t.max_run_up * 100, 3), f"{t.exit_time:%H:%M}", settings])
 
@@ -97,7 +165,7 @@ def wait_until(hhmm: str) -> bool:
     return True
 
 
-def scan_tickers(n: int, target: float) -> list[str]:
+def scan_tickers(n: int, target: float, p: Params = Params()) -> list[str]:
     from . import scanner
 
     if pd.Timestamp.now(tz=NY).weekday() >= 5:
@@ -106,12 +174,15 @@ def scan_tickers(n: int, target: float) -> list[str]:
     table = scanner.scan(scanner.WATCHLIST, target=target)
     picks = scanner.top(table, n)
     msg = scanner.format_message(table, picks, target)
+    if p.entry == "breakout" and picks:
+        msg += (f"\nWatching these. BUY only if {INDEX} is green after ~10 min AND the stock closes "
+                f"above its opening-range high (09:30-{p.or_end}) before {p.last_entry} NY. Max a few BUYs.")
     print(msg)
     notify.send(msg)
     return picks
 
 
-def run_live(tickers: list[str], p: Params) -> None:
+def run_live(tickers: list[str], p: Params, max_positions: int | None = None) -> None:
     if not tickers:
         print("No stocks to watch (weekend, or none passed the scanner filters).")
         return
@@ -122,7 +193,7 @@ def run_live(tickers: list[str], p: Params) -> None:
     errors: dict[str, int] = {}
     results: dict = {}
     try:
-        _loop(tickers, p, done, bought, errors, results)
+        _loop(tickers, p, done, bought, errors, results, max_positions)
     finally:
         if bought:
             msg = day_summary(results)
@@ -130,51 +201,82 @@ def run_live(tickers: list[str], p: Params) -> None:
             notify.send(msg)
 
 
-def _loop(tickers, p, done, bought, errors, results) -> None:
+def _fetch(tk, now, errors) -> pd.DataFrame | None:
+    try:
+        bars = fetch_today(tk)
+    except Exception as e:  # flaky network / Yahoo hiccup: try again next round
+        errors[tk] = errors.get(tk, 0) + 1
+        print(f"{now:%H:%M} {tk}: data fetch failed ({type(e).__name__}), retrying next check")
+        if errors[tk] == 5:
+            notify.send(f"Warning: {tk} data failed 5 times in a row ({type(e).__name__})")
+        return None
+    errors[tk] = 0
+    return bars
+
+
+def _loop(tickers, p, done, bought, errors, results, max_positions=None) -> None:
+    index_bars = None
     while len(done) < len(tickers):
         now = pd.Timestamp.now(tz=NY)
+        close = session_close(now.date())
         if now.weekday() >= 5:
             print("Weekend: market closed.")
             return
-        if now.time() >= pd.Timestamp("16:00").time():
+        if now.strftime("%H:%M") >= close:
             print("Market closed for today.")
             return
         if now.time() < pd.Timestamp("09:30").time():
             print(f"{now:%H:%M} NY: market not open yet; waiting...")
             time.sleep(60)
             continue
-        final = now.time() >= pd.Timestamp("15:57").time()
+        final = now.strftime("%H:%M") >= _minus(close, 3)
+        if p.entry == "breakout" and p.market_filter and market_ok(index_bars, p) is None:
+            got = _fetch(INDEX, now, errors)
+            if got is not None and not got.empty:
+                index_bars = got
+        skipped: dict[str, list[str]] = {}
         for tk in tickers:
             if tk in done:
                 continue
-            try:
-                bars = fetch_today(tk)
-            except Exception as e:  # flaky network / Yahoo hiccup: try again next round
-                errors[tk] = errors.get(tk, 0) + 1
-                print(f"{now:%H:%M} {tk}: data fetch failed ({type(e).__name__}), retrying next check")
-                if errors[tk] == 5:
-                    notify.send(f"Warning: {tk} data failed 5 times in a row ({type(e).__name__})")
+            bars = _fetch(tk, now, errors)
+            if bars is None:
                 continue
-            errors[tk] = 0
             if bars.empty:
                 if now.time() > pd.Timestamp("09:50").time():
                     print(f"{tk}: no data for today after 09:50 NY (holiday?). Skipping.")
                     done.add(tk)
                 continue
-            action, detail = decide(bars, p, final=final)
+            action, detail = decide(bars, p, final=final, index_bars=index_bars)
             if action == "BUY":
                 if tk in bought:  # already announced; same entry bar seen twice
                     action, detail = "HOLD", "in position"
-                bought.add(tk)
+                elif max_positions and len(bought) >= max_positions:
+                    action, detail = "SKIP", f"already {max_positions} positions today"
+                else:
+                    bought.add(tk)
+            elif action in ("HOLD", "SELL") and tk not in bought:
+                # the entry bar was missed (fetch error / restart): announce it now, late
+                if max_positions and len(bought) >= max_positions:
+                    action, detail = "SKIP", f"already {max_positions} positions today"
+                else:
+                    bought.add(tk)
+                    if action == "HOLD":
+                        action, detail = "BUY", f"LATE signal (missed a check), price moved: {detail}"
             print(f"{now:%H:%M} {tk:6s} {action:5s} {detail}")
             if action in ("BUY", "SELL"):
                 notify.send(f"{action} {tk}\n{detail}")
             if action == "SELL":
-                t = simulate_day(bars, p, final=final)
+                t = simulate_session(bars, p, index_bars=index_bars, final=final)
                 if t is not None:
                     log_trade(tk, t, p)
                     results[tk] = t
                 done.add(tk)
+            if action == "SKIP":
+                why = f"no breakout by {p.last_entry}" if detail.startswith("no close above") else detail
+                skipped.setdefault(why, []).append(tk)
+                done.add(tk)
+        for why, tks in skipped.items():
+            notify.send(f"SKIP {', '.join(tks)}\n{why}")
         if final:
             break
         time.sleep(180 - (time.time() % 180))  # wake on the next 3-minute mark
@@ -183,42 +285,63 @@ def _loop(tickers, p, done, bought, errors, results) -> None:
 def replay(ticker: str, day: str, p: Params) -> None:
     from .data import fetch_intraday
 
+    d = pd.Timestamp(day).date()
     all_bars = fetch_intraday(ticker)
-    bars = all_bars[all_bars.index.date == pd.Timestamp(day).date()]
+    bars = all_bars[all_bars.index.date == d]
     if bars.empty:
         raise SystemExit(f"No data for {ticker} on {day}")
+    idx = None
+    if p.entry == "breakout" and p.market_filter:
+        q = fetch_intraday(INDEX)
+        idx = q[q.index.date == d]
     for n in range(1, len(bars) + 1):
-        action, detail = decide(bars.iloc[:n], p, final=(n == len(bars)))
+        sub_idx = None if idx is None else idx[idx.index <= bars.index[n - 1]]
+        action, detail = decide(bars.iloc[:n], p, final=(n == len(bars)), index_bars=sub_idx)
         print(f"{bars.index[n - 1]:%H:%M} {ticker} {action:5s} {detail}")
-        if action == "SELL":
+        if action in ("SELL", "SKIP"):
             break
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("tickers", nargs="*", help="stocks to watch (or use --scan)")
+    ap.add_argument("tickers", nargs="*", help="stocks to watch (or use --scan / --preset)")
+    ap.add_argument("--preset", choices=sorted(PRESETS),
+                    help="tested settings (overrides the strategy options below)")
     ap.add_argument("--scan", type=int, metavar="N", help="let the scanner pick the top N stocks at 09:20 NY")
     ap.add_argument("--scan-target", type=float, default=0.03, help="scanner: rise from the open to look for (0.03 = 3%%)")
+    ap.add_argument("--max-positions", type=int, help="at most this many BUYs per day")
     ap.add_argument("--replay", help="YYYY-MM-DD: replay that day instead of going live")
-    ap.add_argument("--delay", type=int, default=2, help="3-min bars to wait after the open")
+    ap.add_argument("--entry", choices=["open", "breakout"], default="open")
+    ap.add_argument("--delay", type=int, default=2, help="3-min bars to wait after the open (entry=open)")
     ap.add_argument("--stop-loss", type=float, default=0.015)
     ap.add_argument("--trail-drop", type=float, default=0.015, help="0 = off")
     ap.add_argument("--take-profit", type=float, default=0.02, help="0 = off (let winners run)")
     ap.add_argument("--giveback", type=float, default=0.0,
                     help="sell after giving back this share of the best gain, e.g. 0.6 = 60%% (0 = off)")
     ap.add_argument("--giveback-arm", type=float, default=0.01, help="give-back starts once up this much")
+    ap.add_argument("--no-chop", action="store_true", help="turn off the CHOPPY exit")
     a = ap.parse_args()
-    params = Params(entry_delay=a.delay, stop_loss=a.stop_loss, trail_drop=a.trail_drop,
-                    take_profit=a.take_profit, giveback=a.giveback, giveback_arm=a.giveback_arm)
-    if not a.tickers and not a.scan:
-        ap.error("give tickers or --scan N")
+    if a.preset:
+        params, scan_n, max_pos = PRESETS[a.preset]
+        scan_n = a.scan or scan_n
+        max_pos = a.max_positions or max_pos
+    else:
+        params = Params(entry=a.entry, entry_delay=a.delay if a.entry == "open" else 0,
+                        stop_loss=a.stop_loss, trail_drop=a.trail_drop, take_profit=a.take_profit,
+                        giveback=a.giveback, giveback_arm=a.giveback_arm,
+                        chop_flips=0 if a.no_chop else Params.chop_flips)
+        scan_n, max_pos = a.scan, a.max_positions
+    if not a.tickers and not scan_n:
+        ap.error("give tickers, --scan N or --preset")
     if a.replay:
+        if not a.tickers:
+            ap.error("--replay needs a ticker")
         replay(a.tickers[0], a.replay, params)
     else:
         try:
-            run_live(a.tickers or scan_tickers(a.scan, a.scan_target), params)
+            run_live(a.tickers or scan_tickers(scan_n, a.scan_target, params), params, max_pos)
         except KeyboardInterrupt:
             print("Stopped.")
         except Exception as e:
-            notify.send(f"Monitor crashed: {type(e).__name__}. Restart it: bash deploy/mac_run.sh ...")
+            notify.send(f"Monitor crashed: {type(e).__name__}. Restart it: bash deploy/mac_run.sh")
             raise

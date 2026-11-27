@@ -15,6 +15,6 @@ ENV
 fi
 REPO="$(pwd)"
 LINE="CRON_TZ=America/New_York"
-JOB="25 9 * * 1-5 cd $REPO && . \$HOME/.stock_env && .venv/bin/python -m stock_analyzer.monitor NVDA TSLA AMD >> monitor.log 2>&1"
+JOB="25 9 * * 1-5 cd $REPO && . \$HOME/.stock_env && .venv/bin/python -m stock_analyzer.monitor --preset recommended >> monitor.log 2>&1"
 ( crontab -l 2>/dev/null | grep -v -e 'stock_analyzer.monitor' -e '^CRON_TZ=' ; echo "$LINE"; echo "$JOB" ) | crontab -
 echo "Done. Monitor will start at 09:25 New York time, Mon-Fri. Logs: $REPO/monitor.log"
