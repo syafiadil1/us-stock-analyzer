@@ -92,7 +92,7 @@ Let the scanner pick 5 stocks at 09:20 NY, then watch them with a 50% give-back:
 The hit rate is history, not a forecast. Backtest a give-back level before trusting it.
 
 Each closed paper trade goes to `paper_trades.csv` (entry, exit, reason, return, best gain,
-settings), and a day summary is sent to Telegram at the end. Data errors are retried
+settings), and a day summary is sent to Telegram at the close. Data errors are retried
 on the next check; you get a Telegram warning if a stock keeps failing or the monitor crashes.
 
 **Price-up alerts (any time).** Once a stock gets a BUY, you get a PRICE UP message each time
@@ -102,11 +102,15 @@ it reaches a new +1% level since the buy (+1%, +2%, +3% ..., each level once; ch
     PRICE UP (10:33 NY / 11:33 pm Malaysia)
     RIOT +2.05% since buy: now 17.82 (in at ~17.46) | sell if below 17.67
 
-After a SELL the stock is still watched until the close, measured from the sale price, so you see
-whether selling was right ("RGTI +3.37% since you sold ... already sold, this is not a new BUY").
-On busy days these after-sale alerts are most of the messages (Nov 9: 13 of 14), so
-`--no-after-sale` turns them off. `--up-step 0.02` alerts every +2%, `--up-step 0` turns it off.
-`--update-every 60` adds an update on every bought stock on each clock hour.
+After a SELL there are no more alerts for that stock (they were most of the messages on busy days
+and tempt buying back). Instead the day summary at the close says how each sold stock moved
+after the sale, so you can see whether selling was right:
+
+    RGTI: -0.02% (GIVEBACK, best +0.52%) | after the sale +4.71% by the close
+    CIFR: +0.31% (GIVEBACK, best +1.50%) | after the sale -1.16% by the close
+
+`--after-sale` brings the after-sale PRICE UP alerts back. `--up-step 0.02` alerts every +2%,
+`--up-step 0` turns it off. `--update-every 60` adds an update on every bought stock on each clock hour.
 Drops are not alerted separately: the SELL alert (stop / give-back) covers them.
 None of this changes any buy/sell rule.
 

@@ -244,11 +244,12 @@ class UpAlerts:
     """Alert each time a bought stock reaches a NEW +step level (default every +1%), any time of day.
 
     Holding: measured from the buy price (+1%, +2%, +3% ... each level once).
-    Sold:    measured from the sale price, so you see what happened after selling (not a BUY).
+    Sold:    only with after_sale=True (off by default: noisy, and tempts buying back; the day
+             summary shows the after-sale move instead), measured from the sale price.
     A jump over several levels in one 3-min bar gives one alert. Ups only: the downside is
     already covered by the SELL rules (stop / give-back)."""
 
-    def __init__(self, step: float = 0.01, after_sale: bool = True):
+    def __init__(self, step: float = 0.01, after_sale: bool = False):
         self.step, self.after_sale = step, after_sale
         self.pos: dict[str, dict] = {}
 
@@ -319,13 +320,18 @@ def log_trade(ticker: str, t, p: Params, path: Path = JOURNAL) -> None:
                     round(t.ret * 100, 3), round(t.max_run_up * 100, 3), f"{t.exit_time:%H:%M}", settings])
 
 
-def day_summary(results: dict) -> str:
-    """Telegram-friendly end-of-day recap. results: ticker -> Trade."""
+def day_summary(results: dict, after: dict | None = None) -> str:
+    """Telegram-friendly end-of-day recap. results: ticker -> Trade.
+    after: ticker -> price move from the sale to near the close (stocks sold before the close)."""
     if not results:
         return "Day summary: no trades closed today."
+    after = after or {}
     lines = ["Day summary (paper trades):"]
     for tk, t in results.items():
-        lines.append(f"{tk}: {t.ret * 100:+.2f}% ({t.reason}, best {t.max_run_up * 100:+.2f}%)")
+        line = f"{tk}: {t.ret * 100:+.2f}% ({t.reason}, best {t.max_run_up * 100:+.2f}%)"
+        if tk in after:
+            line += f" | after the sale {after[tk] * 100:+.2f}% by the close"
+        lines.append(line)
     avg = sum(t.ret for t in results.values()) / len(results) * 100
     lines.append(f"Average: {avg:+.2f}% over {len(results)} trade(s)")
     return "\n".join(lines)
@@ -422,7 +428,7 @@ def _last_check(now: pd.Timestamp) -> pd.Timestamp:
 
 
 def run_live(tickers: list[str], p: Params, max_positions: int | None = None, update_every: int = 0,
-             up_step: float = 0.01, after_sale: bool = True) -> None:
+             up_step: float = 0.01, after_sale: bool = False) -> None:
     if not tickers:
         print("No stocks to watch (weekend, or none passed the scanner filters).")
         return
@@ -432,12 +438,13 @@ def run_live(tickers: list[str], p: Params, max_positions: int | None = None, up
     bought: set[str] = set()
     errors: dict[str, int] = {}
     results: dict = {}
+    after: dict = {}
     try:
         _loop(tickers, p, done, bought, errors, results, max_positions, HourlyReport(update_every),
-              UpAlerts(up_step, after_sale))
+              UpAlerts(up_step, after_sale), after)
     finally:
         if bought:
-            msg = day_summary(results)
+            msg = day_summary(results, after)
             print(msg)
             notify.send(msg)
 
@@ -455,13 +462,15 @@ def _fetch(tk, now, errors) -> pd.DataFrame | None:
     return bars
 
 
-def _loop(tickers, p, done, bought, errors, results, max_positions=None, report=None, ups=None) -> None:
+def _loop(tickers, p, done, bought, errors, results, max_positions=None, report=None, ups=None,
+          after=None) -> None:
     report = report or HourlyReport(0)
     ups = ups or UpAlerts(0)
     index_bars = None
     prev = prev_closes(tickers) if p.entry == "breakout" and p.max_gap > 0 else {}
-    # after the last sale, keep watching sold stocks (after-sale rises, hourly "since sell")
-    while len(done) < len(tickers) or ups.watching() or report.waiting(_last_check(_now())):
+    after = {} if after is None else after
+    # after a sale, keep going until the close: the day summary says how sold stocks moved after it
+    while len(done) < len(tickers) or results or ups.watching() or report.waiting(_last_check(_now())):
         now = _now()
         close = session_close(now.date())
         if now.weekday() >= 5:
@@ -562,13 +571,21 @@ def _loop(tickers, p, done, bought, errors, results, max_positions=None, report=
             print(msg)
             notify.send(msg)
         if final:
+            for tk, t in results.items():  # stocks sold before the close: where are they now?
+                if t.exit_time >= now - pd.Timedelta(minutes=6):
+                    continue  # sold at the end of the day: nothing to compare
+                if tk not in prices:
+                    b = _fetch(tk, now, errors)
+                    prices[tk] = None if b is None or b.empty else float(b["close"].iloc[-1])
+                if prices[tk] is not None:
+                    after[tk] = prices[tk] / (t.exit / (1 - p.slippage)) - 1
             break
         # wake 15 s after the next 3-minute mark, so Yahoo has published the bar that just ended
         time.sleep(180 - (time.time() % 180) + 15)
 
 
 def replay(ticker: str, day: str, p: Params, update_every: int = 0, up_step: float = 0.01,
-           after_sale: bool = True) -> None:
+           after_sale: bool = False) -> None:
     from .data import fetch_intraday
 
     d = pd.Timestamp(day).date()
@@ -630,8 +647,8 @@ if __name__ == "__main__":
     ap.add_argument("--max-positions", type=int, help="at most this many BUYs per day")
     ap.add_argument("--up-step", type=float, default=0.01, metavar="X",
                     help="alert each time a bought stock is up another X, any time (0.01 = every +1%%; 0 = off)")
-    ap.add_argument("--no-after-sale", action="store_true",
-                    help="no PRICE UP alerts for stocks already sold today")
+    ap.add_argument("--after-sale", action="store_true",
+                    help="also PRICE UP alerts for stocks already sold today (off: the day summary shows it)")
     ap.add_argument("--update-every", type=int, default=0, metavar="MIN",
                     help="also an update on bought stocks every MIN minutes on the clock, e.g. 60 (0 = off)")
     ap.add_argument("--replay", help="YYYY-MM-DD: replay that day instead of going live")
@@ -660,11 +677,11 @@ if __name__ == "__main__":
     if a.replay:
         if not a.tickers:
             ap.error("--replay needs a ticker")
-        replay(a.tickers[0], a.replay, params, a.update_every, a.up_step, not a.no_after_sale)
+        replay(a.tickers[0], a.replay, params, a.update_every, a.up_step, a.after_sale)
     else:
         try:
             run_live(a.tickers or scan_tickers(scan_n, a.scan_target, params), params, max_pos,
-                     a.update_every, a.up_step, not a.no_after_sale)
+                     a.update_every, a.up_step, a.after_sale)
         except KeyboardInterrupt:
             print("Stopped.")
         except Exception as e:

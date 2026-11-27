@@ -387,13 +387,14 @@ def test_live_loop_sends_hourly_updates(monkeypatch):
     assert "SOLD" in hourly[2] and "since sell" in hourly[2] and "last hour" not in hourly[2]
     assert "last hour +0.00%" in hourly[3]                    # flat after the sale
     assert sent[-1].startswith("Day summary") and "AAA: +" in sent[-1]
-    assert end < pd.Timestamp("2026-11-24 15:10", tz=NY_TZ)   # stopped after the last update
+    assert end >= pd.Timestamp("2026-11-24 15:57", tz=NY_TZ)  # ran to the close for the summary
+    assert "after the sale -0.55% by the close" in sent[-1]    # sold ~103.57, 103.00 near the close
     assert not any(m.startswith("PRICE UP") for m in sent)
 
 
 def test_up_alerts_each_new_one_percent_level():
     from stock_analyzer.monitor import UpAlerts
-    u = UpAlerts(0.01)
+    u = UpAlerts(0.01, after_sale=True)
     u.bought("AAA")
     assert u.check("AAA", 99.9, entry=100.0) is None           # below the buy price
     assert u.check("AAA", 100.9) is None
@@ -406,7 +407,7 @@ def test_up_alerts_each_new_one_percent_level():
     assert u.watching() and u.check("AAA", 102.9) is None
     msg = u.check("AAA", 103.02)
     assert "+1.00% since you sold (GIVEBACK +2.00%)" in msg and "not a new BUY" in msg
-    quiet = UpAlerts(0.01, after_sale=False)
+    quiet = UpAlerts(0.01)  # default: no after-sale alerts
     quiet.bought("AAA")
     quiet.sold("AAA", SimpleNamespace(reason="GIVEBACK", ret=0.02), 102.0)
     assert not quiet.watching() and quiet.check("AAA", 110.0) is None
@@ -421,11 +422,16 @@ def test_live_loop_sends_up_alerts_any_time(monkeypatch):
     ups = [m for m in sent if m.startswith("PRICE UP")]
     assert not any(m.startswith("HOURLY") for m in sent)
     body = [m.splitlines()[1] for m in ups]
-    assert [int(float(b.split()[1].strip("+%"))) for b in body] == [1, 2, 3, 1, 2]  # new levels only
-    assert sum("since buy" in b for b in body) == 3            # +1%, +2%, +3% while holding
-    assert sum("since you sold" in b for b in body) == 2       # +1%, +2% after the sale
+    assert [int(float(b.split()[1].strip("+%"))) for b in body] == [1, 2, 3]  # each new level once
+    assert all("since buy" in b for b in body)                 # default: nothing after the sale
     kinds = [m.split()[0] for m in sent]
     assert kinds.index("BUY") < kinds.index("PRICE") < kinds.index("SELL")
     assert ups[0].splitlines()[0].endswith("Malaysia)")
-    assert sent[-1].startswith("Day summary")
-    assert end >= pd.Timestamp("2026-11-24 15:57", tz=NY_TZ)   # watched the sold stock to the close
+    assert sent[-1].startswith("Day summary") and "after the sale +2.34% by the close" in sent[-1]
+    assert end >= pd.Timestamp("2026-11-24 15:57", tz=NY_TZ)   # ran to the close for the summary
+
+
+def test_live_loop_after_sale_alerts_when_asked(monkeypatch):
+    sent, _ = _fake_live_day(monkeypatch, RUN_UP + list(np.linspace(102.5, 106, 30)), after_sale=True)
+    body = [m.splitlines()[1] for m in sent if m.startswith("PRICE UP")]
+    assert sum("since buy" in b for b in body) == 3 and sum("since you sold" in b for b in body) == 2
