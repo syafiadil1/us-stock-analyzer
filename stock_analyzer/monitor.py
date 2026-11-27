@@ -6,6 +6,8 @@
 
 Re-checks every 3 minutes with the SAME rules as the backtest (strategy.py), prints
 WAIT / BUY / HOLD / SELL / SKIP and writes closed paper trades to paper_trades.csv.
+Every hour (on the clock hour, --update-every 60; 0 = off) it also sends one message on every
+stock bought today: price now, change in the last hour, and since the buy (or since the sale).
 Yahoo's free feed can lag, so treat prices as approximate.
 """
 from __future__ import annotations
@@ -26,6 +28,7 @@ from .strategy import (RECOMMENDED, Params, breakout_entry, gap_too_big, givebac
 
 JOURNAL = Path("paper_trades.csv")
 INDEX = "QQQ"  # market filter for breakout mode
+MYT = "Asia/Kuala_Lumpur"
 
 PRESETS = {
     # params, how many stocks the scanner hands over, max open positions per day
@@ -114,6 +117,125 @@ def _decide_breakout(bars, p, final, index_bars, prev_close=None) -> tuple[str, 
     if t is not None:
         return "SELL", _sell_detail(t)
     return "HOLD", _hold_detail(bars.iloc[k:], q)
+
+
+def _held(bars: pd.DataFrame, p: Params) -> pd.DataFrame:
+    """The bars since the paper entry (empty while not in, or on the buy bar itself)."""
+    if p.entry == "breakout":
+        k = breakout_entry(bars, p)
+        return bars.iloc[len(bars):] if k is None else bars.iloc[k:]
+    return bars.iloc[p.entry_delay:]
+
+
+def entry_point(bars: pd.DataFrame, p: Params) -> float | None:
+    """Paper entry price, the same one the simulator uses (next bar's open + costs)."""
+    held = _held(bars, p)
+    if not held.empty:
+        return float(held["open"].iloc[0]) * (1 + p.slippage)
+    if p.entry == "breakout" and len(bars) and breakout_entry(bars, p) == len(bars):
+        return float(bars["close"].iloc[-1]) * (1 + p.slippage)  # buying now, ~at this close
+    return None
+
+
+def sell_line(bars: pd.DataFrame, p: Params) -> float | None:
+    """Price where the rules would sell if a 3-min bar closes at or below it (stop or give-back)."""
+    entry = entry_point(bars, p)
+    if entry is None:
+        return None
+    peak = max([entry] + _held(bars, p)["close"].astype(float).tolist())
+    lines = [entry * (1 - p.stop_loss)] if p.stop_loss > 0 else []
+    gb = giveback_price(entry, peak, p)
+    if gb is not None:
+        lines.append(gb)
+    if p.trail_drop > 0 and peak > entry:
+        lines.append(peak * (1 - p.trail_drop))
+    return max(lines) if lines else None
+
+
+def _pct(now: float, then: float) -> str:
+    return f"{(now / then - 1) * 100:+.2f}%"
+
+
+class HourlyReport:
+    """Every `every` minutes (60 = on each clock hour), one message on every stock bought today.
+
+    Holding: price now, change in the last hour, change since the buy, current sell line.
+    Sold:    the paper result, then how the price moved AFTER the sale (was selling right?).
+    The first update after a buy (or sale) shows only 'since buy' ('since sell'): a 'last hour'
+    figure would mix in the move from before you were in."""
+
+    def __init__(self, every: int = 60):
+        self.every = every
+        self.pos: dict[str, dict] = {}
+        self.next: pd.Timestamp | None = None
+
+    def _mark(self, now: pd.Timestamp) -> pd.Timestamp:
+        return now.floor(f"{self.every}min")
+
+    def bought(self, tk: str, now: pd.Timestamp) -> None:
+        if self.every <= 0 or tk in self.pos:
+            return
+        self.pos[tk] = dict(entry=None, price=None, ref=None, line=None, sold=None, sell_px=None)
+        if self.next is None:
+            self.next = self._mark(now) + pd.Timedelta(minutes=self.every)
+
+    def update(self, tk: str, price: float | None, entry: float | None = None, line: float | None = None) -> None:
+        s = self.pos.get(tk)
+        if s is None:
+            return
+        s["price"] = price
+        if entry is not None:
+            s["entry"] = entry
+        if s["sold"] is None:
+            s["line"] = line
+
+    def sold(self, tk: str, t, sell_px: float) -> None:
+        s = self.pos.get(tk)
+        if s is not None:
+            s.update(sold=t, sell_px=sell_px, price=sell_px, entry=t.entry, ref=None, line=None)
+
+    def drop(self, tk: str) -> None:
+        self.pos.pop(tk, None)
+
+    def sold_tickers(self) -> list[str]:
+        return [tk for tk, s in self.pos.items() if s["sold"] is not None]
+
+    def due(self, now: pd.Timestamp, final: bool = False) -> bool:
+        return bool(self.pos) and self.next is not None and now >= self.next and not final
+
+    def waiting(self, until: pd.Timestamp) -> bool:
+        """True while another update is still coming before `until` (the last check of the day)."""
+        return bool(self.pos) and self.next is not None and self.next < until
+
+    def message(self, now: pd.Timestamp) -> str:
+        mark = self._mark(now)
+        my = mark.tz_convert(MYT).strftime("%-I:%M %p").lower()
+        lines = [f"HOURLY UPDATE {mark:%H:%M} NY ({my} Malaysia)"]
+        for tk, s in sorted(self.pos.items(), key=lambda kv: kv[1]["sold"] is not None):
+            px, t = s["price"], s["sold"]
+            if t is not None:
+                head = f"{tk} SOLD ({t.reason} {t.ret * 100:+.2f}%)"  # since sell = vs the market price
+                if px is None:
+                    lines.append(f"{head}: no price right now")
+                    continue
+                parts = [f"{head}: now {px:.2f}"]
+                if s["ref"] is not None:
+                    parts.append(f"last hour {_pct(px, s['ref'])}")
+                parts.append(f"since sell {_pct(px, s['sell_px'])}")
+            elif px is None or s["entry"] is None:
+                lines.append(f"{tk} holding: no price right now")
+                continue
+            else:
+                parts = [f"{tk} holding: now {px:.2f}"]
+                if s["ref"] is not None:
+                    parts.append(f"last hour {_pct(px, s['ref'])}")
+                parts.append(f"since buy {_pct(px, s['entry'])} (in at ~{s['entry']:.2f})")
+                if s["line"] is not None:
+                    parts.append(f"sell if below {s['line']:.2f}")
+            lines.append(" | ".join(parts))
+            s["ref"] = px
+        self.next = mark + pd.Timedelta(minutes=self.every)
+        return "\n".join(lines)
 
 
 JOURNAL_COLS = ["date", "ticker", "entry", "exit", "reason", "ret_pct", "best_pct", "exit_time", "settings"]
@@ -225,7 +347,16 @@ def scan_tickers(n: int, target: float, p: Params = Params()) -> list[str]:
     return picks
 
 
-def run_live(tickers: list[str], p: Params, max_positions: int | None = None) -> None:
+def _now() -> pd.Timestamp:
+    return pd.Timestamp.now(tz=NY)
+
+
+def _last_check(now: pd.Timestamp) -> pd.Timestamp:
+    """Time of the day's final check (3 minutes before the close)."""
+    return now.normalize() + pd.Timedelta(_minus(session_close(now.date()), 3) + ":00")
+
+
+def run_live(tickers: list[str], p: Params, max_positions: int | None = None, update_every: int = 60) -> None:
     if not tickers:
         print("No stocks to watch (weekend, or none passed the scanner filters).")
         return
@@ -236,7 +367,7 @@ def run_live(tickers: list[str], p: Params, max_positions: int | None = None) ->
     errors: dict[str, int] = {}
     results: dict = {}
     try:
-        _loop(tickers, p, done, bought, errors, results, max_positions)
+        _loop(tickers, p, done, bought, errors, results, max_positions, HourlyReport(update_every))
     finally:
         if bought:
             msg = day_summary(results)
@@ -257,11 +388,13 @@ def _fetch(tk, now, errors) -> pd.DataFrame | None:
     return bars
 
 
-def _loop(tickers, p, done, bought, errors, results, max_positions=None) -> None:
+def _loop(tickers, p, done, bought, errors, results, max_positions=None, report=None) -> None:
+    report = report or HourlyReport(0)
     index_bars = None
     prev = prev_closes(tickers) if p.entry == "breakout" and p.max_gap > 0 else {}
-    while len(done) < len(tickers):
-        now = pd.Timestamp.now(tz=NY)
+    # keep going after the last sale while hourly "since sell" updates are still due today
+    while len(done) < len(tickers) or report.waiting(_last_check(_now())):
+        now = _now()
         close = session_close(now.date())
         if now.weekday() >= 5:
             print("Weekend: market closed.")
@@ -309,12 +442,19 @@ def _loop(tickers, p, done, bought, errors, results, max_positions=None) -> None
             print(f"{now:%H:%M} {tk:6s} {action:5s} {detail}")
             if action in ("BUY", "SELL"):
                 notify.send(f"{action} {tk}\n{detail}")
+            if tk in bought:
+                report.bought(tk, now)
             if action == "SELL":
                 t = simulate_session(bars, p, index_bars=index_bars, final=final, prev_close=prev.get(tk))
                 if t is not None:
                     log_trade(tk, t, p)
                     results[tk] = t
+                    report.sold(tk, t, t.exit / (1 - p.slippage))  # market price, before costs
+                else:
+                    report.drop(tk)
                 done.add(tk)
+            elif action in ("BUY", "HOLD") and tk in bought:
+                report.update(tk, float(bars["close"].iloc[-1]), entry_point(bars, p), sell_line(bars, p))
             if action == "SKIP":
                 why = (f"no breakout by {p.last_entry}" if detail.startswith("no close above")
                        else f"gapped up more than {p.max_gap * 100:.0f}% (big gap-ups tend to fade)"
@@ -323,13 +463,20 @@ def _loop(tickers, p, done, bought, errors, results, max_positions=None) -> None
                 done.add(tk)
         for why, tks in skipped.items():
             notify.send(f"SKIP {', '.join(tks)}\n{why}")
+        if report.due(now, final):
+            for tk in report.sold_tickers():  # sold stocks are no longer checked: fetch a fresh price
+                b = _fetch(tk, now, errors)
+                report.update(tk, None if b is None or b.empty else float(b["close"].iloc[-1]))
+            msg = report.message(now)
+            print(msg)
+            notify.send(msg)
         if final:
             break
         # wake 15 s after the next 3-minute mark, so Yahoo has published the bar that just ended
         time.sleep(180 - (time.time() % 180) + 15)
 
 
-def replay(ticker: str, day: str, p: Params) -> None:
+def replay(ticker: str, day: str, p: Params, update_every: int = 60) -> None:
     from .data import fetch_intraday
 
     d = pd.Timestamp(day).date()
@@ -346,11 +493,31 @@ def replay(ticker: str, day: str, p: Params) -> None:
         dd = yf.download(ticker, start=pd.Timestamp(d) - pd.Timedelta(days=10), end=pd.Timestamp(d),
                          interval="1d", progress=False, auto_adjust=True, multi_level_index=False)
         pc = float(dd["Close"].iloc[-1]) if not dd.empty else None
+    report, sold = HourlyReport(update_every), False
     for n in range(1, len(bars) + 1):
-        sub_idx = None if idx is None else idx[idx.index <= bars.index[n - 1]]
-        action, detail = decide(bars.iloc[:n], p, final=(n == len(bars)), index_bars=sub_idx, prev_close=pc)
-        print(f"{bars.index[n - 1]:%H:%M} {ticker} {action:5s} {detail}")
-        if action in ("SELL", "SKIP"):
+        sub, final = bars.iloc[:n], n == len(bars)
+        now = bars.index[n - 1] + pd.Timedelta(minutes=3)  # when the live monitor would see this bar
+        if sold:  # only the hourly "since sell" updates are left
+            report.update(ticker, float(sub["close"].iloc[-1]))
+        else:
+            sub_idx = None if idx is None else idx[idx.index <= bars.index[n - 1]]
+            action, detail = decide(sub, p, final=final, index_bars=sub_idx, prev_close=pc)
+            print(f"{bars.index[n - 1]:%H:%M} {ticker} {action:5s} {detail}")
+            if action == "SKIP":
+                break
+            if action in ("BUY", "HOLD", "SELL"):
+                report.bought(ticker, now)
+            if action == "SELL":
+                t = simulate_session(sub, p, index_bars=sub_idx, final=final, prev_close=pc)
+                if t is None or not report.pos:
+                    break
+                report.sold(ticker, t, t.exit / (1 - p.slippage))
+                sold = True
+            elif action in ("BUY", "HOLD"):
+                report.update(ticker, float(sub["close"].iloc[-1]), entry_point(sub, p), sell_line(sub, p))
+        if report.due(now, final=now >= _last_check(now)):
+            print(report.message(now))
+        if sold and not report.waiting(_last_check(now)):
             break
 
 
@@ -362,6 +529,8 @@ if __name__ == "__main__":
     ap.add_argument("--scan", type=int, metavar="N", help="let the scanner pick the top N stocks at 09:20 NY")
     ap.add_argument("--scan-target", type=float, default=0.03, help="scanner: rise from the open to look for (0.03 = 3%%)")
     ap.add_argument("--max-positions", type=int, help="at most this many BUYs per day")
+    ap.add_argument("--update-every", type=int, default=60, metavar="MIN",
+                    help="update on bought stocks every MIN minutes, on the clock (0 = off)")
     ap.add_argument("--replay", help="YYYY-MM-DD: replay that day instead of going live")
     ap.add_argument("--entry", choices=["open", "breakout"], default="open")
     ap.add_argument("--delay", type=int, default=2, help="3-min bars to wait after the open (entry=open)")
@@ -388,10 +557,10 @@ if __name__ == "__main__":
     if a.replay:
         if not a.tickers:
             ap.error("--replay needs a ticker")
-        replay(a.tickers[0], a.replay, params)
+        replay(a.tickers[0], a.replay, params, a.update_every)
     else:
         try:
-            run_live(a.tickers or scan_tickers(scan_n, a.scan_target, params), params, max_pos)
+            run_live(a.tickers or scan_tickers(scan_n, a.scan_target, params), params, max_pos, a.update_every)
         except KeyboardInterrupt:
             print("Stopped.")
         except Exception as e:

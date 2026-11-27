@@ -92,8 +92,20 @@ Let the scanner pick 5 stocks at 09:20 NY, then watch them with a 50% give-back:
 The hit rate is history, not a forecast. Backtest a give-back level before trusting it.
 
 Each closed paper trade goes to `paper_trades.csv` (entry, exit, reason, return, best gain,
-settings), and a day summary is sent to Telegram after the last sale. Data errors are retried
+settings), and a day summary is sent to Telegram at the end. Data errors are retried
 on the next check; you get a Telegram warning if a stock keeps failing or the monitor crashes.
+
+**Hourly updates.** Once a stock gets a BUY, one Telegram message every clock hour
+(11:00, 12:00 ... 15:00 NY = midnight to 4 am Malaysia in US winter) lists each stock bought today:
+
+    HOURLY UPDATE 12:00 NY (1:00 am Malaysia)
+    ADBE holding: now 251.07 | last hour +0.38% | since buy +0.42% (in at ~250.02) | sell if below 242.52
+    PATH SOLD (GIVEBACK +0.44%): now 13.40 | since sell +0.94%
+
+Sold stocks stay in the update until the close, so you can see whether selling was right.
+The first update after a buy (or sale) shows only "since buy" ("since sell"). `--update-every 30`
+changes the interval, `--update-every 0` turns it off. The updates are information only and
+do not change any buy/sell rule.
 
 ## Recommended setup (what the tests showed)
 

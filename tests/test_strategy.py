@@ -295,3 +295,89 @@ def test_review_wilson_and_verdicts():
     old = pd.DataFrame([{"date": "2026-11-25", "ret_pct": 1.6, "reason": "CHOPPY", "settings": "tp=0.0 sl=0.03"}])
     out = review(old)
     assert "no trades with the recommended preset yet" in out and "1 older trades" in out
+
+
+# ---------- hourly updates on bought stocks ----------
+from types import SimpleNamespace  # noqa: E402
+
+NY_TZ = "America/New_York"
+
+
+def test_hourly_report_since_buy_then_last_hour_then_since_sell():
+    from stock_analyzer.monitor import HourlyReport
+    from stock_analyzer.strategy import Trade
+    r = HourlyReport(60)
+    t0 = pd.Timestamp("2026-11-24 10:18:15", tz=NY_TZ)
+    r.bought("AAA", t0)
+    r.update("AAA", 101.0, entry=100.0, line=97.0)
+    assert not r.due(t0 + pd.Timedelta(minutes=30))
+    m1 = r.message(pd.Timestamp("2026-11-24 11:00:15", tz=NY_TZ))
+    assert m1.splitlines()[0] == "HOURLY UPDATE 11:00 NY (12:00 am Malaysia)"
+    assert "since buy +1.00%" in m1 and "last hour" not in m1 and "sell if below 97.00" in m1
+    r.update("AAA", 102.01)
+    m2 = r.message(pd.Timestamp("2026-11-24 12:00:15", tz=NY_TZ))
+    assert "last hour +1.00%" in m2 and "since buy +2.01%" in m2
+    trade = SimpleNamespace(entry=100.0, exit=101.9, reason="GIVEBACK", ret=0.019)
+    r.sold("AAA", trade, 102.0)
+    r.update("AAA", 100.98)
+    m3 = r.message(pd.Timestamp("2026-11-24 13:00:15", tz=NY_TZ))
+    assert "AAA SOLD (GIVEBACK +1.90%): now 100.98" in m3 and "since sell -1.00%" in m3 and "last hour" not in m3
+    r.update("AAA", None)
+    assert "no price right now" in r.message(pd.Timestamp("2026-11-24 14:00:15", tz=NY_TZ))
+    assert r.waiting(pd.Timestamp("2026-11-24 15:57", tz=NY_TZ))   # 15:00 still to come
+    r.message(pd.Timestamp("2026-11-24 15:00:15", tz=NY_TZ))
+    assert not r.waiting(pd.Timestamp("2026-11-24 15:57", tz=NY_TZ))
+    off = HourlyReport(0)
+    off.bought("AAA", t0)
+    assert not off.pos and not off.due(t0 + pd.Timedelta(hours=2))
+    assert Trade  # imported for the real type the monitor passes
+
+
+def test_entry_point_and_sell_line_match_simulator():
+    from stock_analyzer.monitor import entry_point, sell_line
+    bars = day(OR_BARS + [101.5, 102, 103, 104])
+    t_entry = bars["open"].iloc[16] * (1 + RECOMMENDED.slippage)
+    assert entry_point(bars.iloc[:16], RECOMMENDED) == bars["close"].iloc[15] * (1 + RECOMMENDED.slippage)
+    assert abs(entry_point(bars, RECOMMENDED) - t_entry) < 1e-9
+    peak = 104.0
+    gb = t_entry + (peak - t_entry) * (1 - RECOMMENDED.giveback)
+    assert abs(sell_line(bars, RECOMMENDED) - gb) < 1e-9
+    assert entry_point(bars.iloc[:10], RECOMMENDED) is None
+
+
+def test_live_loop_sends_hourly_updates(monkeypatch):
+    """Full live loop on a made-up day with a fake clock: BUY, hourly updates, SELL, more updates."""
+    from stock_analyzer import monitor, notify
+    closes = (OR_BARS + [101.5] + list(np.linspace(101.6, 105, 30)) + list(np.linspace(105, 102.5, 15)))
+    closes += [103.0] * (130 - len(closes))
+    stock, index = day(closes), qqq(True, n=130)
+    clock = [pd.Timestamp("2026-11-24 09:29:00", tz=NY_TZ)]
+    sent: list[str] = []
+
+    def sleep(s):
+        clock[0] += pd.Timedelta(seconds=s)
+        assert clock[0] < pd.Timestamp("2026-11-24 17:00", tz=NY_TZ), "loop did not stop"
+
+    def fetch(tk, now=None):
+        b = index if tk == monitor.INDEX else stock
+        return b[b.index + pd.Timedelta(minutes=3) <= clock[0]]
+
+    monkeypatch.setattr(monitor, "_now", lambda: clock[0])
+    monkeypatch.setattr(monitor, "time", SimpleNamespace(sleep=sleep, time=lambda: clock[0].timestamp()))
+    monkeypatch.setattr(monitor, "fetch_today", fetch)
+    monkeypatch.setattr(monitor, "prev_closes", lambda tickers: {})
+    monkeypatch.setattr(monitor, "log_trade", lambda *a, **k: None)
+    monkeypatch.setattr(notify, "send", lambda text: sent.append(text) or True)
+    monkeypatch.setattr(notify, "enabled", lambda: True)
+    monitor.run_live(["AAA"], RECOMMENDED, max_positions=5, update_every=60)
+
+    kinds = [m.split()[0] for m in sent]
+    hourly = [m for m in sent if m.startswith("HOURLY")]
+    assert kinds.index("BUY") < kinds.index("HOURLY") < kinds.index("SELL")
+    assert [m.split()[2] for m in hourly] == ["11:00", "12:00", "13:00", "14:00", "15:00"]
+    assert "since buy" in hourly[0] and "last hour" not in hourly[0]
+    assert "last hour" in hourly[1] and "since buy" in hourly[1]
+    assert "SOLD" in hourly[2] and "since sell" in hourly[2] and "last hour" not in hourly[2]
+    assert "last hour +0.00%" in hourly[3]                    # flat after the sale
+    assert sent[-1].startswith("Day summary") and "AAA: +" in sent[-1]
+    assert clock[0] < pd.Timestamp("2026-11-24 15:10", tz=NY_TZ)   # stopped after the last update
