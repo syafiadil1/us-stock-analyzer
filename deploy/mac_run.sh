@@ -22,4 +22,11 @@ else
   echo "No Telegram token set: alerts will only show in this window."
 fi
 echo "Starting monitor: ${TICKERS[*]} (Ctrl+C to stop). Keep the Mac plugged in."
-exec caffeinate -dims .venv/bin/python -m stock_analyzer.monitor "${TICKERS[@]}"
+caffeinate -dims .venv/bin/python -m stock_analyzer.monitor "${TICKERS[@]}" || echo "monitor exited with an error"
+# After the session: keep today's bars before Yahoo deletes them (for future, larger backtests).
+echo "$(date '+%F %T') saving today's data to data/archive..."
+.venv/bin/python -m stock_analyzer.archive 2>&1 | grep -v -i -E "warning|delisted|failed download" || true
+# Fridays (New York): send the weekly paper-trading review with honest error bars.
+if [ "$(TZ=America/New_York date +%u)" = "5" ] && [ ${#TICKERS[@]} -gt 0 ] && [ "${TICKERS[0]}" = "--preset" ]; then
+  .venv/bin/python -m stock_analyzer.review --telegram || true
+fi

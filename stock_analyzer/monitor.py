@@ -144,16 +144,33 @@ def day_summary(results: dict) -> str:
     return "\n".join(lines)
 
 
-def fetch_today(ticker: str) -> pd.DataFrame:
+def complete_bars(raw: pd.DataFrame, now: pd.Timestamp, bar_min: int = 3) -> pd.DataFrame:
+    """3-min bars from Yahoo 1-min data, keeping ONLY bars that have fully finished.
+
+    Yahoo labels minutes by their start and includes the minute still in progress, so the
+    newest 3-min bar is often incomplete. The backtest only ever sees finished bars; the
+    live monitor must too, or a half-formed bar could trigger a BUY the backtest never would."""
+    b = to_3min(raw)
+    if b.empty:
+        return b
+    idx = pd.DatetimeIndex(raw.index)
+    last_min = (idx.tz_localize(NY) if idx.tz is None else idx.tz_convert(NY)).max()
+    end = b.index + pd.Timedelta(minutes=bar_min)
+    has_last_minute = b.index + pd.Timedelta(minutes=bar_min - 1) <= last_min
+    long_past = end + pd.Timedelta(minutes=2) <= now  # thin stock with no trade in its last minute
+    return b[(end <= now) & (has_last_minute | long_past)]
+
+
+def fetch_today(ticker: str, now: pd.Timestamp | None = None) -> pd.DataFrame:
     import yfinance as yf
 
+    now = now or pd.Timestamp.now(tz=NY)
     raw = yf.download(ticker, period="1d", interval="1m", progress=False,
                       auto_adjust=True, multi_level_index=False)
     if raw.empty:
         return raw
-    b = to_3min(raw)
-    today = pd.Timestamp.now(tz=NY).date()
-    return b[b.index.date == today]  # on holidays Yahoo returns the previous session: ignore it
+    b = complete_bars(raw, now)
+    return b[b.index.date == now.date()]  # on holidays Yahoo returns the previous session: ignore it
 
 
 def prev_closes(tickers: list[str]) -> dict[str, float]:
@@ -308,7 +325,8 @@ def _loop(tickers, p, done, bought, errors, results, max_positions=None) -> None
             notify.send(f"SKIP {', '.join(tks)}\n{why}")
         if final:
             break
-        time.sleep(180 - (time.time() % 180))  # wake on the next 3-minute mark
+        # wake 15 s after the next 3-minute mark, so Yahoo has published the bar that just ended
+        time.sleep(180 - (time.time() % 180) + 15)
 
 
 def replay(ticker: str, day: str, p: Params) -> None:

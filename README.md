@@ -127,6 +127,8 @@ volume, opening-range width, a fixed take-profit (win rate unchanged, return low
 filter, volatility-scaled stops, relative-volume and gap filters, a 13-feature model.
 
 Limits, read these: 60 days is still a small sample and covers one market period.
+How sure are we? Resampling the 25 trading days: win rate 77% (likely 64-87%), average
++0.73% per trade (likely -0.06% to +1.43%). That range still includes zero.
 Yahoo has no older 5-minute data. A coarser 1-hour version of the same idea over 2 years
 was only break-even (52% wins, -0.02%), and it also lost on these same 60 days (-0.36%),
 so the edge depends on the 5-minute details and may be fragile: only live paper trading
@@ -134,3 +136,17 @@ can confirm it. The
 result leans on strong market days (without the best 3 days it is close to break-even),
 trades happen on only about half the days, and some days lose 3% (stop-outs). Live
 fills will differ from the backtest. Paper-trade it for several weeks first.
+
+## How accurate is it really? (review + data archive)
+
+    .venv/bin/python -m stock_analyzer.review          # live paper trades vs backtest, with ranges
+    .venv/bin/python -m stock_analyzer.archive --info  # how much intraday data is stored
+
+- `review` gives win rate and average with 95% ranges and a verdict (TOO EARLY / WORSE /
+  UNCLEAR / CONSISTENT). It needs ~30 trades (~5 weeks) to say anything, and ~230 trades
+  (~9 months) to pin the average down to +/-0.3%. `mac_run.sh` sends it to Telegram on Fridays.
+- `archive` keeps the 1-min and 5-min bars Yahoo deletes after 30/60 days
+  (`data/archive/`, not in git). `mac_run.sh` adds each day after the close. More stored
+  days = backtests that can actually be trusted; re-test the rules on them every few months.
+- The live monitor only acts on finished 3-minute bars (Yahoo also sends the minute still
+  in progress), so live alerts follow exactly the rules that were backtested.

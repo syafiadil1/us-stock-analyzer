@@ -256,3 +256,42 @@ def test_gap_up_rule_skips_big_gap_ups():
     assert simulate_session(bars, BRK, index_bars=qqq(True), prev_close=None) is not None  # unknown: trade
     action, detail = decide(bars, BRK, index_bars=qqq(True), prev_close=96.0)
     assert action == "SKIP" and "gapped up +4.2%" in detail
+
+
+def test_live_uses_only_completed_bars():
+    from stock_analyzer.monitor import complete_bars
+    idx = pd.date_range("2026-11-24 09:30", "2026-11-24 09:40", freq="1min", tz="America/New_York")
+    raw = pd.DataFrame({"Open": 1.0, "High": 1.0, "Low": 1.0, "Close": 1.0, "Volume": 10}, index=idx)
+    ny = lambda hm: pd.Timestamp(f"2026-11-24 {hm}", tz="America/New_York")
+    got = complete_bars(raw, ny("09:40:20"))       # 09:39 bar is still forming
+    assert [t.strftime("%H:%M") for t in got.index] == ["09:30", "09:33", "09:36"]
+    got = complete_bars(raw.iloc[:8], ny("09:39:05"))  # 09:38 minute not published yet
+    assert [t.strftime("%H:%M") for t in got.index] == ["09:30", "09:33"]
+    got = complete_bars(raw.iloc[:8], ny("09:41:30"))  # still missing after 2 extra minutes: accept
+    assert [t.strftime("%H:%M") for t in got.index] == ["09:30", "09:33", "09:36"]
+
+
+def test_archive_merges_and_dedupes(tmp_path):
+    from stock_analyzer.archive import load, merge_save
+    idx = pd.date_range("2026-11-24 09:30", periods=5, freq="5min", tz="America/New_York")
+    a = pd.DataFrame({"Open": 1.0, "High": 2.0, "Low": 0.5, "Close": 1.5, "Volume": 10}, index=idx)
+    assert merge_save("ZZZ", "5m", a.iloc[:3], root=tmp_path) == 3
+    b = a.iloc[2:].copy(); b["Close"] = 9.0            # overlaps one bar, newer value wins
+    assert merge_save("ZZZ", "5m", b, root=tmp_path) == 5
+    got = load("ZZZ", "5m", root=tmp_path)
+    assert got.index[0] == idx[0] and got.loc[idx[2], "close"] == 9.0 and str(got.index.tz) == "America/New_York"
+
+
+def test_review_wilson_and_verdicts():
+    from stock_analyzer.review import review, wilson
+    lo, hi = wilson(8, 10)
+    assert 0.48 < lo < 0.50 and 0.93 < hi < 0.95
+    row = lambda d, r: {"date": d, "ret_pct": r, "reason": "GIVEBACK", "settings": "entry=breakout sl=0.03"}
+    few = pd.DataFrame([row("2026-11-30", 1.0), row("2026-12-01", -0.5)])
+    assert "TOO EARLY" in review(few)
+    days = [f"2026-12-{d:02d}" for d in range(1, 41 // 1) if d <= 28]
+    bad = pd.DataFrame([row(days[i % len(days)], -1.5 if i % 4 else 0.5) for i in range(40)])
+    assert "WORSE" in review(bad)
+    old = pd.DataFrame([{"date": "2026-11-25", "ret_pct": 1.6, "reason": "CHOPPY", "settings": "tp=0.0 sl=0.03"}])
+    out = review(old)
+    assert "no trades with the recommended preset yet" in out and "1 older trades" in out
